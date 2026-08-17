@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      29.0
+// @version      30.0
 // @description  A simplistic, zero-clutter link automation & stealth suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
+// @updateURL    https://raw.githubusercontent.com/tomatotxt/purify/main/purify.user.js
+// @downloadURL  https://raw.githubusercontent.com/tomatotxt/purify/main/purify.user.js
 // @run-at       document-start
 // @grant        GM_addStyle
+// @grant        GM_info
 // @grant        unsafeWindow
 // @grant        window.close
 // ==/UserScript==
@@ -16,6 +19,7 @@
     'use strict';
 
     const CUSTOM_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
+    const REMOTE_UPDATE_URL = 'https://raw.githubusercontent.com/tomatotxt/purify/main/purify.user.js';
 
     /* =========================================================================
        SECTION A: MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
@@ -222,6 +226,7 @@
     const EXPECTED_BUILD = 5382;
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     let scriptTerminated = false;
+    let updateAvailableVersion = null;
 
     function isElementVisible(el) {
         return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
@@ -232,7 +237,31 @@
         return /checkout\.work\.ink|pay\.work\.ink|stripe\.com/i.test(url);
     }
 
-    // 1. Cloak Function.prototype.toString
+    // 1. Programmatic Update Checker on Activation
+    function checkForScriptUpdates() {
+        if (typeof GM_info === 'undefined' || !REMOTE_UPDATE_URL) return;
+
+        fetch(REMOTE_UPDATE_URL, { cache: 'no-store' })
+            .then((res) => {
+                if (res.ok) return res.text();
+                throw new Error('Update check network error');
+            })
+            .then((remoteScriptCode) => {
+                const match = remoteScriptCode.match(/@version\s+([0-9.]+)/);
+                if (match && match[1]) {
+                    const remoteVer = match[1].trim();
+                    const localVer = (GM_info.script && GM_info.script.version) ? GM_info.script.version.trim() : '30.0';
+
+                    if (remoteVer !== localVer) {
+                        updateAvailableVersion = remoteVer;
+                        renderBuildBadge();
+                    }
+                }
+            })
+            .catch(() => {});
+    }
+
+    // 2. Cloak Function.prototype.toString
     const hookedFunctionsMap = new WeakMap();
     const originalToString = Function.prototype.toString;
 
@@ -253,7 +282,7 @@
         return targetFn;
     }
 
-    // 2. Focus & Visibility Spoofer
+    // 3. Focus & Visibility Spoofer
     let isLockdownActive = false;
 
     const origVisDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
@@ -296,7 +325,7 @@
         Document.prototype.hasFocus = makeNative(customHasFocus, origHasFocus);
     }
 
-    // 3. Mini-Window Proxy (15s Auto-Close, Checkout Block)
+    // 4. Mini-Window Proxy (15s Auto-Close, Checkout Block)
     const originalOpen = pageWindow.open;
 
     function createMiniWindow(url) {
@@ -363,7 +392,7 @@
 
     document.addEventListener('click', onDocumentClick, true);
 
-    // 4. Purify Task Overlay (Minimalist Calming UI)
+    // 5. Purify Task Overlay (Minimalist Calming UI)
     function showTaskLockdownOverlay(durationSeconds = 16) {
         if (scriptTerminated || document.getElementById('tm-task-lockdown-overlay')) return;
 
@@ -426,7 +455,7 @@
         }, 1000);
     }
 
-    // 5. Anti-Adblock Defusers
+    // 6. Anti-Adblock Defusers
     const noopFn = makeNative(function () {}, originalToString);
     pageWindow.__h82AlnkH6D91__ = noopFn;
     pageWindow.__p4qa8r1lb17__ = noopFn;
@@ -443,10 +472,50 @@
         pageWindow.adsbygoogle = adsQueue;
     }
 
-    // 6. Purify Status Badge (Top-Right Minimalist Pill)
+    // 7. Purify Status Badge (With 1-Click Update Notification)
     function renderBuildBadge() {
-        if (scriptTerminated || !document.body || document.getElementById('tm-build-badge')) return;
+        if (scriptTerminated || !document.body) return;
 
+        let badge = document.getElementById('tm-build-badge');
+        if (!badge) {
+            badge = document.createElement('div');
+            badge.id = 'tm-build-badge';
+            Object.assign(badge.style, {
+                position: 'fixed',
+                top: '20px',
+                right: '20px',
+                zIndex: '2147483645',
+                padding: '6px 14px',
+                background: 'rgba(19, 22, 31, 0.85)',
+                backdropFilter: 'blur(12px)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                borderRadius: '100px',
+                color: '#f8fafc',
+                fontSize: '11px',
+                fontWeight: '600',
+                fontFamily: 'Outfit, system-ui, sans-serif',
+                letterSpacing: '0.3px',
+                userSelect: 'none',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+                transition: 'all 0.2s ease'
+            });
+            document.body.appendChild(badge);
+        }
+
+        // If a new userscript version was detected via remote check
+        if (updateAvailableVersion) {
+            badge.style.pointerEvents = 'auto';
+            badge.style.cursor = 'pointer';
+            badge.style.borderColor = 'rgba(52, 211, 153, 0.4)';
+            badge.style.boxShadow = '0 0 16px rgba(16, 185, 129, 0.35)';
+            badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#34d399;margin-right:8px;box-shadow:0 0 10px #34d399;"></span>Update to v${updateAvailableVersion} ↗`;
+            badge.onclick = () => {
+                window.open(REMOTE_UPDATE_URL, '_blank');
+            };
+            return;
+        }
+
+        // Standard Build Verification State
         let buildNumber = 5382;
         const svelteScript = document.querySelector('link[href*="/_app/immutable/nodes/0."], link[href*="/_app/immutable/chunks/"]');
         
@@ -461,34 +530,13 @@
         const dotColor = isMatch ? '#10b981' : '#f59e0b';
         const labelText = isMatch ? `Purify • ${buildNumber}` : `Purify • Outdated`;
 
-        const badge = document.createElement('div');
-        badge.id = 'tm-build-badge';
+        badge.style.pointerEvents = 'none';
+        badge.style.cursor = 'default';
+        badge.onclick = null;
         badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${dotColor};margin-right:8px;box-shadow:0 0 10px ${dotColor};"></span>${labelText}`;
-        
-        Object.assign(badge.style, {
-            position: 'fixed',
-            top: '20px',
-            right: '20px',
-            zIndex: '2147483645',
-            padding: '6px 14px',
-            background: 'rgba(19, 22, 31, 0.85)',
-            backdropFilter: 'blur(12px)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            borderRadius: '100px',
-            color: '#f8fafc',
-            fontSize: '11px',
-            fontWeight: '600',
-            fontFamily: 'Outfit, system-ui, sans-serif',
-            letterSpacing: '0.3px',
-            pointerEvents: 'none',
-            userSelect: 'none',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.4)'
-        });
-
-        document.body.appendChild(badge);
     }
 
-    // 7. Styles: Minimalist layout & total clutter removal
+    // 8. Styles: Minimalist layout & total clutter removal
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -560,6 +608,7 @@
             margin-bottom: 0px !important;
         }
 
+        /* Hide filler SEO text walls */
         .linkcard div:has(> .wrap),
         .linkcard .wrap,
         .gtext {
@@ -622,7 +671,7 @@
         document.documentElement.appendChild(style);
     }
 
-    // 8. Vignette Destroyer
+    // 9. Vignette Destroyer
     function killVignettes() {
         if (scriptTerminated) return;
         const vignetteTargets = document.querySelectorAll(`
@@ -641,7 +690,7 @@
         }
     }
 
-    // 9. Auto-Consent
+    // 10. Auto-Consent
     let consentHandled = false;
 
     function handleAutoConsent() {
@@ -672,7 +721,7 @@
         }
     }
 
-    // 10. Proceed Button Relocation
+    // 11. Proceed Button Relocation
     function relocateProceedButton() {
         if (scriptTerminated) return;
         const proceedBtn = document.querySelector('.accessBtn');
@@ -688,7 +737,7 @@
         }
     }
 
-    // 11. Modal Free-Path Auto-Selector
+    // 12. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
         if (scriptTerminated) return;
         const modal = document.querySelector('.main-modal');
@@ -707,7 +756,7 @@
         }
     }
 
-    // 12. Full Teardown on Destination Screen
+    // 13. Full Teardown on Destination Screen
     function checkCompletion(obs) {
         if (scriptTerminated) return;
 
@@ -738,7 +787,7 @@
         }
     }
 
-    // 13. Global Observer Loop
+    // 14. Global Observer Loop
     const observer = new MutationObserver(() => {
         checkCompletion(observer);
         if (scriptTerminated) return;
@@ -758,6 +807,7 @@
     });
 
     window.addEventListener('DOMContentLoaded', () => {
+        checkForScriptUpdates();
         checkCompletion(observer);
         if (!scriptTerminated) {
             killVignettes();
