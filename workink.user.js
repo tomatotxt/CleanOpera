@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Work.ink & MediaFire Suite (Opera)
 // @namespace    https://work.ink/
-// @version      25.0
-// @description  Blocks checkout.work.ink popups, MediaFire auto-downloader, Opera check, Sign-In modal fix, 15s task handler with jitter, and ad defusal.
-// @author       You
+// @version      26.0
+// @description  MediaFire auto-downloader, CleanOpera portable download portal, checkout blocker, 15s task handler with jitter, and ad defusal.
+// @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
 // @run-at       document-start
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    const CUSTOM_OPERA_AIR_URL = 'https://www.mediafire.com/file/t4hbgqc2xbyoo9p/OperaAir.zip/file';
+    const CUSTOM_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
 
     /* =========================================================================
        SECTION A: RELIABLE MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
@@ -127,25 +127,25 @@
                     Optimized Exclusively for Opera
                 </h1>
                 <p style="font-size: 1rem; color: #a1a1aa; max-width: 520px; margin: 0 auto 30px auto; line-height: 1.5;">
-                    This script relies on Opera-specific browser internals. Download the custom portable build below to proceed.
+                    Work.ink requires standard Opera browser tokens to validate tasks. Download the portable build below to proceed.
                 </p>
 
                 <div style="background: #131316; border: 1px solid rgba(0, 153, 116, 0.3); border-radius: 20px; padding: 28px; display: flex; flex-direction: column; gap: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); text-align: left; margin-bottom: 30px;">
                     <div>
-                        <div style="font-size: 1.35rem; font-weight: 800; color: #ffffff; margin-bottom: 4px;">Opera Air (Portable Cleaned Build)</div>
-                        <div style="font-size: 0.85rem; color: #34d399; font-weight: 600; margin-bottom: 10px;">Pre-configured / Lightweight</div>
+                        <div style="font-size: 1.35rem; font-weight: 800; color: #ffffff; margin-bottom: 4px;">Opera Portable (Cleaned Build)</div>
+                        <div style="font-size: 0.85rem; color: #34d399; font-weight: 600; margin-bottom: 10px;">Pre-configured / Full Compatibility</div>
                         <p style="font-size: 0.875rem; color: #9ca3af; line-height: 1.5; margin: 0;">
-                            Standalone portable archive. Includes optimized configuration for fast task verification and zero background clutter.
+                            Pre-configured standalone Opera package. Fully recognized by Work.ink verification routines with zero telemetry clutter.
                         </p>
                     </div>
 
-                    <a href="${CUSTOM_OPERA_AIR_URL}" target="_blank" style="display: flex; align-items: center; justify-content: center; width: 100%; padding: 14px 0; background: #009974; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 1rem; box-shadow: 0 6px 20px rgba(0, 153, 116, 0.35); box-sizing: border-box; transition: background-color 0.15s ease;">
-                        Download OperaAir.zip (MediaFire) ↗
+                    <a href="${CUSTOM_OPERA_URL}" target="_blank" style="display: flex; align-items: center; justify-content: center; width: 100%; padding: 14px 0; background: #009974; color: #ffffff; text-decoration: none; border-radius: 12px; font-weight: 700; font-size: 1rem; box-shadow: 0 6px 20px rgba(0, 153, 116, 0.35); box-sizing: border-box; transition: background-color 0.15s ease;">
+                        Download CleanOpera.zip (MediaFire) ↗
                     </a>
                 </div>
 
                 <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px; padding: 16px 24px; display: inline-flex; align-items: center; justify-content: center; gap: 20px; font-size: 0.85rem; color: #d4d4d8;">
-                    <span><strong>1.</strong> Extract & Open OperaAir</span>
+                    <span><strong>1.</strong> Extract & Open CleanOpera</span>
                     <span style="color: rgba(255,255,255,0.2);">→</span>
                     <span><strong>2.</strong> Add Tampermonkey</span>
                     <span style="color: rgba(255,255,255,0.2);">→</span>
@@ -439,7 +439,7 @@
         document.body.appendChild(badge);
     }
 
-    // 7. Styles: Complete ad, vignette, and Stripe Link cleanup
+    // 7. Styles: Ad, vignette, and Stripe Link cleanup
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -621,7 +621,7 @@
         }
     }
 
-    // 10. Proceed Button Relocator
+    // 10. Proceed Button Relocation
     function relocateProceedButton() {
         if (scriptTerminated) return;
         const proceedBtn = document.querySelector('.accessBtn');
@@ -637,7 +637,7 @@
         }
     }
 
-    // 11. Modal Free-Path Auto-Selector
+    // 11. Modal Free-Path Auto-Selector (Only operates on the monetization modal)
     function handleModalFreeSelection() {
         if (scriptTerminated) return;
         const modal = document.querySelector('.main-modal');
