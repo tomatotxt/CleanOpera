@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      30.0
+// @version      31.0
 // @description  A simplistic, zero-clutter link automation & stealth suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
@@ -18,8 +18,11 @@
 (function () {
     'use strict';
 
-    const CUSTOM_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
+    const FALLBACK_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
+    const REMOTE_LINK_CONFIG_URL = 'https://github.com/tomatotxt/CleanOpera/raw/refs/heads/main/cleanoperalink';
     const REMOTE_UPDATE_URL = 'https://raw.githubusercontent.com/tomatotxt/purify/main/purify.user.js';
+    
+    let activeOperaUrl = FALLBACK_OPERA_URL;
 
     /* =========================================================================
        SECTION A: MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
@@ -78,7 +81,7 @@
     }
 
     /* =========================================================================
-       SECTION B: OPERA VERIFICATION & PURIFY LOCK SCREEN
+       SECTION B: OPERA VERIFICATION & DYNAMIC PURIFY LOCK SCREEN
        ========================================================================= */
     function checkIsOpera() {
         if (navigator.userAgentData && Array.isArray(navigator.userAgentData.brands)) {
@@ -200,7 +203,7 @@
                     <p>
                         Purify is engineered exclusively for the Opera browser. Download our clean portable package with <strong>Tampermonkey pre-installed</strong> to continue.
                     </p>
-                    <a href="${CUSTOM_OPERA_URL}" target="_blank" class="btn">
+                    <a id="tm-purify-dl-btn" href="${activeOperaUrl}" target="_blank" class="btn">
                         Get CleanOpera (.zip) ↗
                     </a>
                     <div class="steps">
@@ -213,6 +216,22 @@
                 </div>
             </body>
         `;
+
+        // Fetch latest dynamic MediaFire link from GitHub
+        fetch(REMOTE_LINK_CONFIG_URL, { cache: 'no-store' })
+            .then((res) => {
+                if (res.ok) return res.text();
+                throw new Error('Config fetch failed');
+            })
+            .then((remoteUrlText) => {
+                const fetchedLink = remoteUrlText.trim();
+                if (fetchedLink.startsWith('http')) {
+                    activeOperaUrl = fetchedLink;
+                    const dlBtn = document.getElementById('tm-purify-dl-btn');
+                    if (dlBtn) dlBtn.href = fetchedLink;
+                }
+            })
+            .catch(() => {});
     }
 
     if (!checkIsOpera()) {
@@ -250,7 +269,7 @@
                 const match = remoteScriptCode.match(/@version\s+([0-9.]+)/);
                 if (match && match[1]) {
                     const remoteVer = match[1].trim();
-                    const localVer = (GM_info.script && GM_info.script.version) ? GM_info.script.version.trim() : '30.0';
+                    const localVer = (GM_info.script && GM_info.script.version) ? GM_info.script.version.trim() : '31.0';
 
                     if (remoteVer !== localVer) {
                         updateAvailableVersion = remoteVer;
@@ -502,7 +521,6 @@
             document.body.appendChild(badge);
         }
 
-        // If a new userscript version was detected via remote check
         if (updateAvailableVersion) {
             badge.style.pointerEvents = 'auto';
             badge.style.cursor = 'pointer';
@@ -515,7 +533,6 @@
             return;
         }
 
-        // Standard Build Verification State
         let buildNumber = 5382;
         const svelteScript = document.querySelector('link[href*="/_app/immutable/nodes/0."], link[href*="/_app/immutable/chunks/"]');
         
@@ -536,7 +553,7 @@
         badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${dotColor};margin-right:8px;box-shadow:0 0 10px ${dotColor};"></span>${labelText}`;
     }
 
-    // 8. Styles: Minimalist layout & total clutter removal
+    // 8. Styles
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
