@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Work.ink & MediaFire Suite (Opera)
 // @namespace    https://work.ink/
-// @version      26.0
-// @description  MediaFire auto-downloader, CleanOpera portable download portal, checkout blocker, 15s task handler with jitter, and ad defusal.
+// @version      27.0
+// @description  MediaFire auto-downloader, CleanOpera download portal, checkout blocker, 15s task handler with jitter, and premature finish fix.
 // @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
@@ -177,6 +177,11 @@
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
     let scriptTerminated = false;
 
+    // Visibility helper to prevent premature script termination
+    function isElementVisible(el) {
+        return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
+    }
+
     // Helper to identify checkout/payment links
     function isCheckoutUrl(url) {
         if (!url || typeof url !== 'string') return false;
@@ -281,7 +286,7 @@
             const url = args[0];
             if (url && !scriptTerminated) {
                 if (isCheckoutUrl(url)) {
-                    return null; // Silently block checkout redirection
+                    return null;
                 }
                 return createMiniWindow(url);
             }
@@ -302,7 +307,7 @@
                     e.preventDefault();
                     e.stopPropagation();
                     e.stopImmediatePropagation();
-                    return; // Block checkout links
+                    return;
                 }
 
                 e.preventDefault();
@@ -439,7 +444,7 @@
         document.body.appendChild(badge);
     }
 
-    // 7. Styles: Ad, vignette, and Stripe Link cleanup
+    // 7. Styles
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -637,7 +642,7 @@
         }
     }
 
-    // 11. Modal Free-Path Auto-Selector (Only operates on the monetization modal)
+    // 11. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
         if (scriptTerminated) return;
         const modal = document.querySelector('.main-modal');
@@ -656,14 +661,14 @@
         }
     }
 
-    // 12. Full Teardown on Destination Screen
+    // 12. Accurate Completion Check (Only triggers when #access-offers is actually visible)
     function checkCompletion(obs) {
         if (scriptTerminated) return;
 
         const destBtn = document.querySelector('#access-offers');
-        const isEasyScreen = document.body?.textContent?.includes('That was easy, right?');
 
-        if (destBtn || isEasyScreen) {
+        // Verify the completion button is rendered and physically visible on screen
+        if (destBtn && isElementVisible(destBtn)) {
             scriptTerminated = true;
 
             document.removeEventListener('click', onDocumentClick, true);
