@@ -1,0 +1,1 @@
+<div class="fixed z-[998] top-0 left-0 w-full h-full flex items-center justify-center backdrop-blur-2xl bg-black/60 p-8 flex-col overflow-auto max-[600px]:p-0"><div class="lds-ellipsis"><div></div> <div></div> <div></div> <div></div></div> <span class="text-lg font-semibold text-white">Waiting for step completion...</span></div>
