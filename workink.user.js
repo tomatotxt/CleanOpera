@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      60.0
-// @description  A simplistic link automation, ad defusal, audio silencer & permanent popup interceptor suite for Opera.
+// @version      69.0
+// @description  A simplistic link automation, ad defusal, audio silencer & native modal text swapper suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
@@ -33,10 +33,12 @@
     const TEMPMAIL_TURNSTILE_SITEKEY = '0x4AAAAAAA_d4Z0H2NTOXki1';
 
     let activeOperaUrl = FALLBACK_OPERA_URL;
+    let scriptTerminated = false;
     let isLockdownActive = false;
     let lockdownInterval = null;
     let consentHandled = false;
     let observer = null;
+    let isCycleScheduled = false;
 
     let currentEmail = null;
     let currentKey = null;
@@ -45,6 +47,96 @@
     let lastReceivedOtp = null;
     let emailSubmitted = false;
     let solverSpawned = false;
+
+    /* =========================================================================
+       OPERA BROWSER VERIFICATION & GATEKEEPER
+       ========================================================================= */
+    function isOperaBrowser() {
+        const ua = navigator.userAgent || '';
+        const isOprUA = /OPR\/|Opera/i.test(ua);
+        const isOprGlobal = typeof window.opr !== 'undefined';
+        const isOprBrand = Array.isArray(navigator.userAgentData?.brands) &&
+            navigator.userAgentData.brands.some(b => /Opera|OPR/i.test(b.brand));
+        return isOprUA || isOprGlobal || isOprBrand;
+    }
+
+    function fetchRemoteConfig() {
+        if (typeof GM_xmlhttpRequest === 'function') {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: REMOTE_LINK_CONFIG_URL,
+                onload: function (res) {
+                    if (res.status === 200 && res.responseText.trim().startsWith('http')) {
+                        activeOperaUrl = res.responseText.trim();
+                        const btn = document.getElementById('purify-download-opera-btn');
+                        if (btn) btn.href = activeOperaUrl;
+                    }
+                }
+            });
+        }
+    }
+
+    function showNonOperaOverlay() {
+        if (document.getElementById('purify-opera-required-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'purify-opera-required-overlay';
+        Object.assign(overlay.style, {
+            position: 'fixed',
+            inset: '0',
+            zIndex: '2147483647',
+            backgroundColor: 'rgba(9, 10, 15, 0.96)',
+            backdropFilter: 'blur(20px)',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: '#f8fafc',
+            fontFamily: 'Outfit, system-ui, -apple-system, sans-serif',
+            userSelect: 'none',
+            padding: '20px'
+        });
+
+        overlay.innerHTML = `
+            <div style="background: rgba(19, 22, 31, 0.95); border: 1px solid rgba(239, 68, 68, 0.3); padding: 40px 48px; border-radius: 28px; text-align: center; max-width: 460px; box-shadow: 0 30px 70px rgba(0,0,0,0.8);">
+                <div style="width: 56px; height: 56px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 24px auto;">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="8" x2="12" y2="12"></line>
+                        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                    </svg>
+                </div>
+                <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0 0 10px 0; color: #f8fafc; letter-spacing: -0.4px;">Opera Browser Required</h2>
+                <p style="font-size: 0.925rem; color: #94a3b8; margin: 0 0 28px 0; line-height: 1.6; font-weight: 300;">
+                    The <strong style="color: #f8fafc; font-weight: 600;">Purify Automation Suite</strong> is designed exclusively for Opera Browser. Please download and install <strong>CleanOpera</strong> to access this link.
+                </p>
+                <a href="${activeOperaUrl}" target="_blank" id="purify-download-opera-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 14px 24px; background: #10b981; color: #ffffff; font-weight: 600; font-size: 0.95rem; border-radius: 14px; text-decoration: none; box-shadow: 0 6px 20px rgba(16, 185, 129, 0.35); transition: all 0.2s ease;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="7 10 12 15 17 10"></polyline>
+                        <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Download CleanOpera
+                </a>
+            </div>
+        `;
+
+        if (document.body) {
+            document.body.appendChild(overlay);
+        } else {
+            document.addEventListener('DOMContentLoaded', () => document.body.appendChild(overlay));
+        }
+    }
+
+    // Check Opera compatibility on Work.ink
+    if (window.location.hostname.includes('work.ink')) {
+        fetchRemoteConfig();
+        if (!isOperaBrowser()) {
+            console.warn('[Purify] Non-Opera browser detected. Prompting CleanOpera download...');
+            showNonOperaOverlay();
+            return; // Terminate further script execution on non-Opera browsers
+        }
+    }
 
     /* =========================================================================
        SECTION 0: TOTAL PRISTINE STATE INITIALIZER (COOKIES + LOCALSTORAGE)
@@ -249,18 +341,12 @@
         return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
     }
 
-    // Crucial: outgoing.work.ink IS EXCLUDED / IGNORED so it opens natively
     function isExcludedFromIntercept(url) {
         if (!url || typeof url !== 'string') return true;
-
-        // 1. Explicitly ignore outgoing.work.ink
-        if (url.includes('outgoing.work.ink')) return true;
-
-        // 2. Ignore payment checkouts & tempmail solver
+        if (/outgoing\.work\.ink/i.test(url)) return true;
         return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank/i.test(url);
     }
 
-    // Detect social links for 5s lockdown vs 15s task lockdown
     function isSocialLink(url) {
         if (!url || typeof url !== 'string') return false;
         return /discord\.(com|gg)|youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|facebook\.com|tiktok\.com|t\.me|telegram\.org/i.test(url);
@@ -320,18 +406,17 @@
         };
     } catch (e) {}
 
-    // 1. PERMANENT Task Mini-Window Handler (Intercepts all popups EXCEPT outgoing.work.ink and checkouts)
+    // 1. PERMANENT Task Mini-Window Handler & Window.open Hook Engine
     const originalOpen = pageWindow.open;
 
     function createTaskMiniWindow(url) {
         if (isExcludedFromIntercept(url)) {
-            return null;
+            return originalOpen.call(pageWindow, url, '_blank');
         }
 
         const miniFeatures = 'width=380,height=380,left=120,top=120,menubar=no,toolbar=no,location=no,status=no,resizable=yes';
-        const popup = Reflect.apply(originalOpen, pageWindow, [url, '_blank', miniFeatures]);
+        const popup = originalOpen.call(pageWindow, url, '_blank', miniFeatures);
 
-        // Auto-close ALL mini-window popups after 5 seconds
         if (popup) {
             setTimeout(() => {
                 try {
@@ -340,7 +425,6 @@
             }, 5000);
         }
 
-        // 5s lockdown for social links, 15s lockdown for all other task links (+ random jitter)
         const isSocial = isSocialLink(url);
         const baseSeconds = isSocial ? 5 : 15;
         const randomJitterSec = isSocial
@@ -352,26 +436,31 @@
         return popup;
     }
 
-    const openProxy = new Proxy(originalOpen, {
-        apply(target, thisArg, args) {
-            const url = args[0];
-            if (url && !isExcludedFromIntercept(url)) {
-                return createTaskMiniWindow(url);
-            }
-            return Reflect.apply(originalOpen, thisArg, args);
+    // Window.open Proxy Interceptor
+    function openProxy(url, target, features) {
+        if (url && typeof url === 'string' && !isExcludedFromIntercept(url)) {
+            console.log('[Purify] Intercepted programmatic window.open:', url);
+            return createTaskMiniWindow(url);
         }
-    });
+        return originalOpen.apply(this, arguments);
+    }
 
-    pageWindow.open = openProxy;
+    try {
+        pageWindow.open = openProxy;
+        if (typeof unsafeWindow !== 'undefined') {
+            unsafeWindow.open = openProxy;
+        }
+    } catch (err) {
+        console.error('[Purify] Failed to overwrite pageWindow.open:', err);
+    }
 
-    // PERMANENT Click Interceptor (never unbound, ignores outgoing.work.ink)
     function onDocumentClick(e) {
         const target = e.target.closest('.cta-btn, button:has(.arrow-nudge), button:has(svg), a[target="_blank"], a[href*="/api/"]');
         if (target && !target.closest('#access-offers, #tm-build-badge, #tm-task-lockdown-overlay')) {
             const href = target.href || target.closest('a')?.href;
             if (href && !href.startsWith('javascript:')) {
                 if (isExcludedFromIntercept(href)) {
-                    return; // Let outgoing.work.ink and checkouts proceed natively
+                    return;
                 }
 
                 e.preventDefault();
@@ -384,8 +473,64 @@
 
     document.addEventListener('click', onDocumentClick, true);
 
-    // 2. Purify Task Overlay (Dynamic 5s / 15s Countdown)
-    function showTaskLockdownOverlay(durationSeconds = 16, taskTypeLabel = 'Background Task') {
+    // 2. Purify Task Overlay & Work.ink Native .modalwrapper Text Swapper
+    function removeLockdownOverlay() {
+        if (lockdownInterval) {
+            clearInterval(lockdownInterval);
+            lockdownInterval = null;
+        }
+        isLockdownActive = false;
+
+        const overlay = document.getElementById('tm-task-lockdown-overlay');
+        if (overlay && overlay.parentNode) {
+            overlay.remove();
+        }
+
+        try {
+            pageWindow.dispatchEvent(new Event('focus'));
+        } catch (e) {}
+    }
+
+    function checkEarlyTaskCompletion() {
+        if (!isLockdownActive) return;
+
+        const stepDoneIcon = document.querySelector('.lucide-check, [data-task-done="true"], .task-completed');
+        if (stepDoneIcon && isElementVisible(stepDoneIcon)) {
+            removeLockdownOverlay();
+        }
+    }
+
+    function updateNativeWorkInkOverlayText(remainingSec, taskTypeLabel) {
+        try {
+            // Target Work.ink's native .modalwrapper elements directly
+            const modalTitle = document.querySelector('.modalwrapper .title, .modalwrapper span.title');
+            if (modalTitle) {
+                modalTitle.textContent = `Purifying ${taskTypeLabel}...`;
+            }
+
+            const modalSubtitle = document.querySelector('.modalwrapper .subtitle, .modalwrapper span.subtitle');
+            if (modalSubtitle) {
+                modalSubtitle.textContent = `Holding focus in background (${remainingSec}s)...`;
+            }
+
+            // Fallback for generic text nodes if modalwrapper class changes
+            if (!modalTitle) {
+                const allElements = document.querySelectorAll('span.title, span.subtitle, h1, h2, h3, p');
+                allElements.forEach((el) => {
+                    if (el.children.length === 0) {
+                        const text = el.textContent || '';
+                        if (text.includes('Continue browsing...')) {
+                            el.textContent = `Purifying ${taskTypeLabel}...`;
+                        } else if (text.includes('Accept cookies on the opened page') || text.includes('proceed faster')) {
+                            el.textContent = `Holding focus in background (${remainingSec}s)...`;
+                        }
+                    }
+                });
+            }
+        } catch (e) {}
+    }
+
+    function showTaskLockdownOverlay(durationSeconds = 16, taskTypeLabel = 'Sponsored Task') {
         if (document.getElementById('tm-task-lockdown-overlay')) return;
 
         const overlay = document.createElement('div');
@@ -424,22 +569,26 @@
 
         isLockdownActive = true;
 
-        let remaining = durationSeconds;
-        const timerEl = document.getElementById('tm-lockdown-timer');
+        const startTime = Date.now();
+        const endTime = startTime + (durationSeconds * 1000);
 
         lockdownInterval = setInterval(() => {
-            remaining--;
+            const now = Date.now();
+            const remaining = Math.max(0, Math.ceil((endTime - now) / 1000));
+
+            const timerEl = document.getElementById('tm-lockdown-timer');
             if (timerEl) timerEl.textContent = `${remaining}s`;
 
-            if (remaining <= 0) {
-                clearInterval(lockdownInterval);
-                isLockdownActive = false;
+            updateNativeWorkInkOverlayText(remaining, taskTypeLabel);
 
-                if (overlay && overlay.parentNode) {
-                    overlay.remove();
-                }
+            if (remaining <= 0 || now >= endTime) {
+                removeLockdownOverlay();
             }
-        }, 1000);
+        }, 200);
+
+        setTimeout(() => {
+            removeLockdownOverlay();
+        }, (durationSeconds + 1) * 1000);
     }
 
     // 3. Anti-Adblock Defusers
@@ -503,7 +652,7 @@
     }
 
     /* =========================================================================
-       SECTION D: SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
+       5. SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
        ========================================================================= */
     function openTempMailMiniSolver() {
         if (currentEmail || solverSpawned) return;
@@ -516,7 +665,7 @@
         const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=no`;
 
         console.log('[Purify] Spawning TempMail solver mini-window...');
-        window.open('https://www.tempmail.co/404', 'TurnstileSolver', features);
+        originalOpen.call(pageWindow, 'https://www.tempmail.co/404', 'TurnstileSolver', features);
     }
 
     if (typeof GM_addValueChangeListener === 'function') {
@@ -624,7 +773,6 @@
         const isAuthModal = Array.from(signInModal.querySelectorAll('h2')).some(h => /sign\s*in|verify/i.test(h.textContent));
         if (!isAuthModal) return;
 
-        // Auto-spawn solver mini-window ONLY when the Sign-In / Verify modal is active
         if (!currentEmail) {
             openTempMailMiniSolver();
         }
@@ -670,7 +818,7 @@
         }
     }
 
-    // 5. Styles
+    // 6. Safe Styles
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -726,12 +874,12 @@
         }
 
         /* --- C. PURIFIED LANDING PAGE (ZERO-SCROLL) --- */
-        .pt-32 {
+        main.linkui > div.pt-32 {
             display: none !important;
         }
 
         main.linkui {
-            padding-top: 80px !important;
+            padding-top: 75px !important;
             display: flex !important;
             flex-direction: column !important;
             align-items: center !important;
@@ -739,13 +887,22 @@
 
         .linkview {
             padding-top: 0px !important;
+            margin-top: 0px !important;
             margin-bottom: 0px !important;
         }
 
-        /* Hide filler SEO text walls */
-        .linkcard div:has(> .wrap),
-        .linkcard .wrap,
-        .gtext {
+        /* Hide side-column recommendations list */
+        .linkview > div:has(.linklist.vertical),
+        div.sticky:has(.linklist),
+        .linklist.vertical {
+            display: none !important;
+        }
+
+        /* Hide filler SEO text paragraphs and bulky video preview */
+        .linkcard p.gtext,
+        .linkcard .wrap > p.gtext,
+        .linkcard .hasvideo,
+        .linkcard div:has(> .hasvideo) {
             display: none !important;
         }
 
@@ -760,11 +917,27 @@
             margin-bottom: 12px !important;
         }
 
-        .accessBtn-container-relocated {
+        /* CSS Flex ordering places Proceed Button directly under title without DOM reparenting */
+        .lcdefault {
+            display: flex !important;
+            flex-direction: column !important;
+        }
+
+        .lcdefault > div:first-child,
+        .lcdefault > h1 {
+            order: 1 !important;
+        }
+
+        .lcdefault > div:has(.accessBtn) {
+            order: 2 !important;
             display: flex !important;
             justify-content: center !important;
             width: 100% !important;
-            margin: 20px 0 !important;
+            margin: 12px 0 20px 0 !important;
+        }
+
+        .lcdefault > * {
+            order: 3 !important;
         }
 
         .accessBtn {
@@ -782,11 +955,13 @@
             box-shadow: 0 8px 24px rgba(16, 185, 129, 0.5) !important;
         }
 
-        /* --- D. MODAL PURIFICATION (ONLY UPSELL TIERS ARE HIDDEN) --- */
+        /* --- D. MODAL PURIFICATION (HIDE UPSELL TIERS & OR SEPARATOR) --- */
         .main-modal:has(.no-ads-badge) p:has(+ .space-y-3),
         .main-modal:has(.no-ads-badge) div.px-6 > p:first-child,
         .main-modal:has(.no-ads-badge) .space-y-3:has(.no-ads-badge),
-        .main-modal:has(.no-ads-badge) .space-y-3:has(.no-ads-badge) + div {
+        .main-modal:has(.no-ads-badge) .space-y-3:has(.no-ads-badge) + div,
+        div.my-3:has(> span.svelte-1o00xxn),
+        div.flex.items-center.justify-center.my-3:has(.flex-1.h-px) {
             display: none !important;
         }
 
@@ -852,23 +1027,7 @@
         } catch (e) {}
     }
 
-    // 9. Proceed Button Relocation
-    function relocateProceedButton() {
-        try {
-            const proceedBtn = document.querySelector('.accessBtn');
-            const targetContainer = document.querySelector('.linkcard .lcdefault');
-
-            if (proceedBtn && targetContainer) {
-                const btnWrapper = proceedBtn.closest('.mx-auto.w-fit') || proceedBtn.parentElement;
-                if (btnWrapper && !targetContainer.contains(btnWrapper)) {
-                    btnWrapper.classList.add('accessBtn-container-relocated');
-                    targetContainer.appendChild(btnWrapper);
-                }
-            }
-        } catch (e) {}
-    }
-
-    // 10. Modal Free-Path Auto-Selector
+    // 9. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
         try {
             const modal = document.querySelector('.main-modal');
@@ -888,7 +1047,7 @@
         } catch (e) {}
     }
 
-    // 11. Completion Status Update (Non-destructive)
+    // 10. Completion Status Update (Non-destructive)
     function updateCompletionStatus() {
         try {
             const headings = document.querySelectorAll('h2');
@@ -919,20 +1078,26 @@
         } catch (e) {}
     }
 
-    // 12. PERPETUAL Observer Loop
+    // 11. DEBOUCED 60FPS OBSERVER LOOP
     function runCoreCycle() {
         updateCompletionStatus();
+        checkEarlyTaskCompletion();
         silenceAllMedia();
         killVignettes();
         handleAutoConsent();
-        relocateProceedButton();
         handleModalFreeSelection();
         handleAutoSignInWorkflow();
         renderBuildBadge();
     }
 
     observer = new MutationObserver(() => {
-        runCoreCycle();
+        if (!isCycleScheduled) {
+            isCycleScheduled = true;
+            requestAnimationFrame(() => {
+                isCycleScheduled = false;
+                runCoreCycle();
+            });
+        }
     });
 
     observer.observe(document.documentElement, {
