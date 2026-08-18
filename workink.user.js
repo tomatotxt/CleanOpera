@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      54.0
-// @description  A simplistic, zero-clutter link automation, ad defusal, audio silencer & automated TempMail auth suite for Opera.
+// @version      60.0
+// @description  A simplistic link automation, ad defusal, audio silencer & permanent popup interceptor suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
@@ -33,7 +33,6 @@
     const TEMPMAIL_TURNSTILE_SITEKEY = '0x4AAAAAAA_d4Z0H2NTOXki1';
 
     let activeOperaUrl = FALLBACK_OPERA_URL;
-    let scriptTerminated = false;
     let isLockdownActive = false;
     let lockdownInterval = null;
     let consentHandled = false;
@@ -46,6 +45,51 @@
     let lastReceivedOtp = null;
     let emailSubmitted = false;
     let solverSpawned = false;
+
+    /* =========================================================================
+       SECTION 0: TOTAL PRISTINE STATE INITIALIZER (COOKIES + LOCALSTORAGE)
+       ========================================================================= */
+    function clearPristineState() {
+        try {
+            if (typeof localStorage !== 'undefined' && localStorage.clear) {
+                localStorage.clear();
+            }
+
+            if (typeof sessionStorage !== 'undefined' && sessionStorage.clear) {
+                sessionStorage.clear();
+            }
+
+            if (window.indexedDB && typeof window.indexedDB.databases === 'function') {
+                window.indexedDB.databases().then((dbs) => {
+                    dbs.forEach((db) => {
+                        if (db.name) window.indexedDB.deleteDatabase(db.name);
+                    });
+                }).catch(() => {});
+            }
+
+            const cookies = document.cookie.split(';');
+            const host = window.location.hostname;
+            const rootDomain = '.' + host.replace(/^www\./, '');
+
+            for (let i = 0; i < cookies.length; i++) {
+                const cookie = cookies[i];
+                const eqPos = cookie.indexOf('=');
+                const name = eqPos > -1 ? cookie.substring(0, eqPos).trim() : cookie.trim();
+
+                if (name) {
+                    const expires = 'expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+                    document.cookie = `${name}=; ${expires}`;
+                    document.cookie = `${name}=; ${expires}; domain=${host}`;
+                    document.cookie = `${name}=; ${expires}; domain=${rootDomain}`;
+                    document.cookie = `${name}=; ${expires}; domain=.work.ink`;
+                }
+            }
+        } catch (e) {}
+    }
+
+    if (window.location.hostname.includes('work.ink')) {
+        clearPristineState();
+    }
 
     /* =========================================================================
        SECTION A: MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
@@ -205,12 +249,23 @@
         return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
     }
 
-    function isExcludedUrl(url) {
+    // Crucial: outgoing.work.ink IS EXCLUDED / IGNORED so it opens natively
+    function isExcludedFromIntercept(url) {
         if (!url || typeof url !== 'string') return true;
+
+        // 1. Explicitly ignore outgoing.work.ink
+        if (url.includes('outgoing.work.ink')) return true;
+
+        // 2. Ignore payment checkouts & tempmail solver
         return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank/i.test(url);
     }
 
-    // Helper: Simulates native input events with full bubbling for Svelte reactivity
+    // Detect social links for 5s lockdown vs 15s task lockdown
+    function isSocialLink(url) {
+        if (!url || typeof url !== 'string') return false;
+        return /discord\.(com|gg)|youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|facebook\.com|tiktok\.com|t\.me|telegram\.org/i.test(url);
+    }
+
     function setSvelteInputValue(input, value) {
         if (!input || input.value === value) return;
         input.focus();
@@ -227,7 +282,6 @@
         input.dispatchEvent(new Event('blur', { bubbles: true }));
     }
 
-    // Humanized single-click handler (prevents bot flags)
     function safeClick(btn) {
         if (!btn || btn.dataset.purifyClicked) return;
         btn.dataset.purifyClicked = 'true';
@@ -266,52 +320,73 @@
         };
     } catch (e) {}
 
-    // 1. Task Mini-Window Handler (15s Auto-Close & Checkout Blocker)
-    function createMiniWindow(url) {
-        if (scriptTerminated || isExcludedUrl(url)) {
+    // 1. PERMANENT Task Mini-Window Handler (Intercepts all popups EXCEPT outgoing.work.ink and checkouts)
+    const originalOpen = pageWindow.open;
+
+    function createTaskMiniWindow(url) {
+        if (isExcludedFromIntercept(url)) {
             return null;
         }
 
         const miniFeatures = 'width=380,height=380,left=120,top=120,menubar=no,toolbar=no,location=no,status=no,resizable=yes';
-        const popup = window.open(url, '_blank', miniFeatures);
+        const popup = Reflect.apply(originalOpen, pageWindow, [url, '_blank', miniFeatures]);
 
+        // Auto-close ALL mini-window popups after 5 seconds
         if (popup) {
             setTimeout(() => {
                 try {
                     if (!popup.closed) popup.close();
                 } catch (e) {}
-            }, 15000);
+            }, 5000);
         }
 
-        const jitterSeconds = 15 + Number((Math.random() * 1.2 + 0.1).toFixed(1));
-        showTaskLockdownOverlay(Math.ceil(jitterSeconds));
+        // 5s lockdown for social links, 15s lockdown for all other task links (+ random jitter)
+        const isSocial = isSocialLink(url);
+        const baseSeconds = isSocial ? 5 : 15;
+        const randomJitterSec = isSocial
+            ? Number((Math.random() * 0.7 + 0.1).toFixed(1))
+            : Number((Math.random() * 1.1 + 0.1).toFixed(1));
+        const totalDurationSec = Math.ceil(baseSeconds + randomJitterSec);
+
+        showTaskLockdownOverlay(totalDurationSec, isSocial ? 'Social Media Link' : 'Sponsored Task');
         return popup;
     }
 
-    function onDocumentClick(e) {
-        if (scriptTerminated) return;
+    const openProxy = new Proxy(originalOpen, {
+        apply(target, thisArg, args) {
+            const url = args[0];
+            if (url && !isExcludedFromIntercept(url)) {
+                return createTaskMiniWindow(url);
+            }
+            return Reflect.apply(originalOpen, thisArg, args);
+        }
+    });
 
-        const target = e.target.closest('.cta-btn, button:has(.arrow-nudge), a[target="_blank"]');
-        if (target && !target.closest('#access-offers')) {
+    pageWindow.open = openProxy;
+
+    // PERMANENT Click Interceptor (never unbound, ignores outgoing.work.ink)
+    function onDocumentClick(e) {
+        const target = e.target.closest('.cta-btn, button:has(.arrow-nudge), button:has(svg), a[target="_blank"], a[href*="/api/"]');
+        if (target && !target.closest('#access-offers, #tm-build-badge, #tm-task-lockdown-overlay')) {
             const href = target.href || target.closest('a')?.href;
             if (href && !href.startsWith('javascript:')) {
-                if (isExcludedUrl(href)) {
-                    return;
+                if (isExcludedFromIntercept(href)) {
+                    return; // Let outgoing.work.ink and checkouts proceed natively
                 }
 
                 e.preventDefault();
                 e.stopPropagation();
                 e.stopImmediatePropagation();
-                createMiniWindow(href);
+                createTaskMiniWindow(href);
             }
         }
     }
 
     document.addEventListener('click', onDocumentClick, true);
 
-    // 2. Purify Task Overlay
-    function showTaskLockdownOverlay(durationSeconds = 16) {
-        if (scriptTerminated || document.getElementById('tm-task-lockdown-overlay')) return;
+    // 2. Purify Task Overlay (Dynamic 5s / 15s Countdown)
+    function showTaskLockdownOverlay(durationSeconds = 16, taskTypeLabel = 'Background Task') {
+        if (document.getElementById('tm-task-lockdown-overlay')) return;
 
         const overlay = document.createElement('div');
         overlay.id = 'tm-task-lockdown-overlay';
@@ -334,8 +409,8 @@
         overlay.innerHTML = `
             <div style="background: rgba(19, 22, 31, 0.9); border: 1px solid rgba(255, 255, 255, 0.08); padding: 36px 44px; border-radius: 24px; text-align: center; max-width: 400px; box-shadow: 0 30px 60px rgba(0,0,0,0.7);">
                 <div style="width: 44px; height: 44px; border: 3px solid rgba(16, 185, 129, 0.2); border-top-color: #10b981; border-radius: 50%; animation: purify-spin 1s linear infinite; margin: 0 auto 20px auto;"></div>
-                <h3 style="font-size: 1.25rem; font-weight: 600; margin: 0 0 6px 0; color: #f8fafc; letter-spacing: -0.3px;">Purifying Task</h3>
-                <p style="font-size: 0.875rem; color: #94a3b8; margin: 0 0 24px 0; line-height: 1.5; font-weight: 300;">Holding focus while validation completes in the background.</p>
+                <h3 style="font-size: 1.25rem; font-weight: 600; margin: 0 0 6px 0; color: #f8fafc; letter-spacing: -0.3px;">Purifying ${taskTypeLabel}</h3>
+                <p style="font-size: 0.875rem; color: #94a3b8; margin: 0 0 24px 0; line-height: 1.5; font-weight: 300;">Mini-window opened & closing in 5s. Holding focus while verification completes.</p>
                 <div style="display: inline-flex; align-items: center; justify-content: center; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 100px; padding: 8px 24px;">
                     <span id="tm-lockdown-timer" style="font-size: 1.45rem; font-weight: 700; color: #34d399; font-variant-numeric: tabular-nums;">${durationSeconds}s</span>
                 </div>
@@ -356,7 +431,7 @@
             remaining--;
             if (timerEl) timerEl.textContent = `${remaining}s`;
 
-            if (remaining <= 0 || scriptTerminated) {
+            if (remaining <= 0) {
                 clearInterval(lockdownInterval);
                 isLockdownActive = false;
 
@@ -382,7 +457,7 @@
 
     // 4. Purify Status Badge
     function renderBuildBadge() {
-        if (scriptTerminated || !document.body || document.getElementById('tm-build-badge')) return;
+        if (!document.body || document.getElementById('tm-build-badge')) return;
 
         try {
             let buildNumber = 5382;
@@ -428,7 +503,7 @@
     }
 
     /* =========================================================================
-       5. SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
+       SECTION D: SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
        ========================================================================= */
     function openTempMailMiniSolver() {
         if (currentEmail || solverSpawned) return;
@@ -543,21 +618,18 @@
     }
 
     function handleAutoSignInWorkflow() {
-        if (scriptTerminated) return;
-
         const signInModal = document.querySelector('.main-modal, .move-down-small-screen');
         if (!signInModal || !isElementVisible(signInModal)) return;
 
-        // Matches both "Sign In" and "Verify Email" modal steps
         const isAuthModal = Array.from(signInModal.querySelectorAll('h2')).some(h => /sign\s*in|verify/i.test(h.textContent));
         if (!isAuthModal) return;
 
-        // Auto-spawn solver mini-window if email isn't generated yet
+        // Auto-spawn solver mini-window ONLY when the Sign-In / Verify modal is active
         if (!currentEmail) {
             openTempMailMiniSolver();
         }
 
-        // Step 1: Click "Continue with Email"
+        // Step 1: Auto-click "Continue with Email"
         const continueWithEmailBtn = Array.from(signInModal.querySelectorAll('button')).find(b => b.textContent.includes('Continue with Email'));
         if (continueWithEmailBtn && isElementVisible(continueWithEmailBtn)) {
             if (isWorkInkTurnstileReady()) {
@@ -566,7 +638,7 @@
             }
         }
 
-        // Step 2: Populate Email and click "Continue"
+        // Step 2: Auto-populate Email and click "Continue"
         const emailInput = document.querySelector('input#email[type="email"]');
         if (emailInput && isElementVisible(emailInput) && currentEmail && !emailSubmitted) {
             if (emailInput.value !== currentEmail) {
@@ -582,7 +654,7 @@
             }
         }
 
-        // Step 3: Populate OTP Code and click "Verify & Continue"
+        // Step 3: Auto-populate OTP code from noreply@work.ink and submit
         const codeInput = document.querySelector('input#code');
         if (codeInput && isElementVisible(codeInput) && lastReceivedOtp) {
             if (codeInput.value !== lastReceivedOtp) {
@@ -598,7 +670,7 @@
         }
     }
 
-    // 6. Styles
+    // 5. Styles
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -735,7 +807,6 @@
 
     // 7. Vignette Destroyer
     function killVignettes() {
-        if (scriptTerminated) return;
         try {
             const vignetteTargets = document.querySelectorAll(`
                 #google_vignette,
@@ -755,7 +826,7 @@
 
     // 8. Auto-Consent
     function handleAutoConsent() {
-        if (consentHandled || scriptTerminated) return;
+        if (consentHandled) return;
         try {
             const agreeButtons = document.querySelectorAll(`
                 #qc-cmp2-container button[mode="primary"],
@@ -783,7 +854,6 @@
 
     // 9. Proceed Button Relocation
     function relocateProceedButton() {
-        if (scriptTerminated) return;
         try {
             const proceedBtn = document.querySelector('.accessBtn');
             const targetContainer = document.querySelector('.linkcard .lcdefault');
@@ -800,7 +870,6 @@
 
     // 10. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
-        if (scriptTerminated) return;
         try {
             const modal = document.querySelector('.main-modal');
             if (!modal || !modal.querySelector('.no-ads-badge')) return;
@@ -819,24 +888,29 @@
         } catch (e) {}
     }
 
-    // 11. Full Teardown on Destination Screen
-    function checkCompletion(obs) {
-        if (scriptTerminated) return;
+    // 11. Completion Status Update (Non-destructive)
+    function updateCompletionStatus() {
         try {
-            const destBtn = document.querySelector('#access-offers');
-
-            if (destBtn && isElementVisible(destBtn)) {
-                scriptTerminated = true;
-
-                document.removeEventListener('click', onDocumentClick, true);
-
-                const overlay = document.getElementById('tm-task-lockdown-overlay');
-                if (overlay && overlay.parentNode) overlay.remove();
-
-                if (obs) {
-                    obs.disconnect();
+            const headings = document.querySelectorAll('h2');
+            let isDone = false;
+            for (const h of headings) {
+                if (h.textContent.includes('That was easy, right?') && isElementVisible(h)) {
+                    isDone = true;
+                    break;
                 }
+            }
 
+            if (!isDone) {
+                const destBtn = document.querySelector('#access-offers');
+                if (destBtn && isElementVisible(destBtn)) {
+                    const cardText = destBtn.closest('div')?.parentElement?.textContent || '';
+                    if (cardText.includes('That was easy, right?') || cardText.includes('helped an independent publisher')) {
+                        isDone = true;
+                    }
+                }
+            }
+
+            if (isDone) {
                 const badge = document.getElementById('tm-build-badge');
                 if (badge) {
                     badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#10b981;margin-right:8px;box-shadow:0 0 10px #10b981;"></span>Purified`;
@@ -845,11 +919,9 @@
         } catch (e) {}
     }
 
-    // 12. Global Observer Loop
+    // 12. PERPETUAL Observer Loop
     function runCoreCycle() {
-        checkCompletion(observer);
-        if (scriptTerminated) return;
-
+        updateCompletionStatus();
         silenceAllMedia();
         killVignettes();
         handleAutoConsent();
