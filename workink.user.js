@@ -1,16 +1,21 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      35.0
-// @description  A simplistic, zero-clutter link automation, ad defusal & audio silencer suite for Opera.
+// @version      54.0
+// @description  A simplistic, zero-clutter link automation, ad defusal, audio silencer & automated TempMail auth suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
 // @match        https://*.mediafire.com/*
+// @match        https://www.tempmail.co/404*
 // @updateURL    https://raw.githubusercontent.com/tomatotxt/CleanOpera/raw/refs/heads/main/cleanoperalink
 // @downloadURL  https://raw.githubusercontent.com/tomatotxt/CleanOpera/raw/refs/heads/main/cleanoperalink
-// @run-at       document-start
+// @run-at       document-idle
 // @grant        GM_addStyle
 // @grant        GM_info
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @grant        window.close
 // ==/UserScript==
@@ -18,13 +23,32 @@
 (function () {
     'use strict';
 
+    /* =========================================================================
+       GLOBAL CONSTANTS & HOISTED STATE VARIABLES (SINGLE DECLARATION)
+       ========================================================================= */
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    const EXPECTED_BUILD = 5382;
     const FALLBACK_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
-    const REMOTE_LINK_CONFIG_URL = 'https://raw.githubusercontent.com/tomatotxt/CleanOpera/main/cleanoperalink';
+    const REMOTE_LINK_CONFIG_URL = 'https://raw.githubusercontent.com/tomatotxt/CleanOpera/raw/refs/heads/main/cleanoperalink';
+    const TEMPMAIL_TURNSTILE_SITEKEY = '0x4AAAAAAA_d4Z0H2NTOXki1';
+
     let activeOperaUrl = FALLBACK_OPERA_URL;
+    let scriptTerminated = false;
+    let isLockdownActive = false;
+    let lockdownInterval = null;
+    let consentHandled = false;
+    let observer = null;
+
+    let currentEmail = null;
+    let currentKey = null;
+    let currentCsrf = null;
+    let pollInterval = null;
+    let lastReceivedOtp = null;
+    let emailSubmitted = false;
+    let solverSpawned = false;
 
     /* =========================================================================
-       SECTION A: RELIABLE MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
+       SECTION A: MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
        ========================================================================= */
     if (window.location.hostname.includes('mediafire.com')) {
         let downloadInitiated = false;
@@ -33,7 +57,7 @@
             if (downloadInitiated) return;
 
             const dlBtn = document.getElementById('downloadButton');
-            
+
             if (dlBtn && dlBtn.href) {
                 const targetUrl = dlBtn.href;
 
@@ -74,190 +98,147 @@
             attributeFilter: ['href', 'class']
         });
 
-        window.addEventListener('DOMContentLoaded', runMediaFireAutoDownload);
-        window.addEventListener('load', runMediaFireAutoDownload);
+        runMediaFireAutoDownload();
         return;
     }
 
     /* =========================================================================
-       SECTION B: OPERA VERIFICATION & PURIFY LOCK SCREEN
+       SECTION B: TEMPMAIL.CO SOLVER POPUP (CAPTCHA & EMAIL CREATOR)
        ========================================================================= */
-    function checkIsOpera() {
-        const ua = (navigator.userAgent || '') + ' ' + (navigator.appVersion || '');
-        const vendor = navigator.vendor || '';
+    if (window.location.hostname === 'www.tempmail.co' && window.location.pathname.startsWith('/404')) {
+        document.title = "Purify • Verification";
+        document.body.innerHTML = `
+            <div style="display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #090a0f; overflow: hidden;">
+                <div id="turnstile-box"></div>
+            </div>
+        `;
 
-        if (/OPR\/|Opera\/|Opera|OPT\/|Coast\//i.test(ua)) return true;
-        if (/Opera/i.test(vendor)) return true;
+        function getCookie(name) {
+            const match = document.cookie.match(new RegExp('(^|;\\s*)(' + name + ')=([^;]*)'));
+            return match ? decodeURIComponent(match[3]) : null;
+        }
 
-        const uad = navigator.userAgentData;
-        if (uad && Array.isArray(uad.brands)) {
-            if (uad.brands.some((b) => /Opera|OPR|Opera GX/i.test(b.brand))) {
-                return true;
+        async function ensureCsrf() {
+            await fetch('/sanctum/csrf-cookie', { credentials: 'same-origin' });
+            return getCookie('XSRF-TOKEN');
+        }
+
+        function loadTurnstile() {
+            return new Promise((resolve) => {
+                if (pageWindow.turnstile && typeof pageWindow.turnstile.render === 'function') {
+                    return resolve(pageWindow.turnstile);
+                }
+
+                const callbackName = 'tsCallback_' + Math.random().toString(36).substring(7);
+                pageWindow[callbackName] = function () {
+                    resolve(pageWindow.turnstile);
+                    delete pageWindow[callbackName];
+                };
+
+                const script = document.createElement('script');
+                script.src = `https://challenges.cloudflare.com/turnstile/v0/api.js?onload=${callbackName}&render=explicit`;
+                script.async = true;
+
+                const checkInterval = setInterval(() => {
+                    if (pageWindow.turnstile && typeof pageWindow.turnstile.render === 'function') {
+                        clearInterval(checkInterval);
+                        resolve(pageWindow.turnstile);
+                    }
+                }, 50);
+
+                setTimeout(() => clearInterval(checkInterval), 6000);
+                document.head.appendChild(script);
+            });
+        }
+
+        async function startChallenge() {
+            try {
+                const turnstile = await loadTurnstile();
+                turnstile.render('#turnstile-box', {
+                    sitekey: TEMPMAIL_TURNSTILE_SITEKEY,
+                    theme: 'dark',
+                    callback: async function (token) {
+                        try {
+                            const csrf = await ensureCsrf();
+                            const res = await fetch('/new', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                    'Accept': 'application/json, text/plain, */*',
+                                    'X-Requested-With': 'XMLHttpRequest',
+                                    'X-XSRF-TOKEN': csrf
+                                },
+                                body: JSON.stringify({ 'cf-turnstile-response': token }),
+                                credentials: 'same-origin'
+                            });
+
+                            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                            const json = await res.json();
+
+                            GM_setValue('tempmail_session', {
+                                email: json.data.email,
+                                key: json.data.key,
+                                csrf: csrf,
+                                ts: Date.now()
+                            });
+
+                            window.close();
+                        } catch (err) {
+                            console.error('Failed to create email:', err);
+                        }
+                    }
+                });
+            } catch (err) {
+                console.error('Turnstile load error:', err);
             }
         }
 
-        if (
-            typeof pageWindow.opr !== 'undefined' ||
-            typeof window.opr !== 'undefined' ||
-            typeof pageWindow.opera !== 'undefined' ||
-            typeof window.opera !== 'undefined'
-        ) {
-            return true;
-        }
-
-        if (pageWindow.chrome && (pageWindow.chrome.opr || pageWindow.opr)) {
-            return true;
-        }
-
-        return false;
-    }
-
-    function renderPurifyLockScreen() {
-        try {
-            window.stop();
-        } catch (e) {}
-
-        document.documentElement.innerHTML = `
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1">
-                <title>Purify • Opera Required</title>
-                <link rel="preconnect" href="https://fonts.googleapis.com">
-                <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-                <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
-                <style>
-                    * { box-sizing: border-box; margin: 0; padding: 0; }
-                    body {
-                        background-color: #090a0f;
-                        color: #f8fafc;
-                        font-family: 'Outfit', -apple-system, sans-serif;
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        min-height: 100vh;
-                        padding: 24px;
-                    }
-                    .card {
-                        background: rgba(19, 22, 31, 0.85);
-                        backdrop-filter: blur(16px);
-                        border: 1px solid rgba(255, 255, 255, 0.08);
-                        border-radius: 28px;
-                        padding: 48px 40px;
-                        max-width: 460px;
-                        width: 100%;
-                        text-align: center;
-                        box-shadow: 0 30px 70px rgba(0, 0, 0, 0.7);
-                    }
-                    .brand-tag {
-                        display: inline-flex;
-                        align-items: center;
-                        gap: 8px;
-                        background: rgba(16, 185, 129, 0.08);
-                        border: 1px solid rgba(16, 185, 129, 0.25);
-                        border-radius: 100px;
-                        padding: 5px 14px;
-                        margin-bottom: 24px;
-                        font-size: 0.82rem;
-                        font-weight: 600;
-                        color: #34d399;
-                        letter-spacing: 0.5px;
-                    }
-                    h1 {
-                        font-size: 1.75rem;
-                        font-weight: 700;
-                        margin-bottom: 12px;
-                        letter-spacing: -0.5px;
-                        color: #f8fafc;
-                    }
-                    p {
-                        font-size: 0.95rem;
-                        color: #94a3b8;
-                        line-height: 1.6;
-                        margin-bottom: 32px;
-                        font-weight: 300;
-                    }
-                    .btn {
-                        display: flex;
-                        align-items: center;
-                        justify-content: center;
-                        width: 100%;
-                        padding: 15px 0;
-                        background: #10b981;
-                        color: #ffffff;
-                        text-decoration: none;
-                        border-radius: 16px;
-                        font-weight: 600;
-                        font-size: 0.98rem;
-                        box-shadow: 0 8px 24px rgba(16, 185, 129, 0.3);
-                        transition: transform 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
-                    }
-                    .btn:hover {
-                        background: #059669;
-                        box-shadow: 0 10px 28px rgba(16, 185, 129, 0.45);
-                        transform: translateY(-1px);
-                    }
-                    .steps {
-                        display: flex;
-                        justify-content: center;
-                        align-items: center;
-                        gap: 12px;
-                        font-size: 0.8rem;
-                        color: #64748b;
-                        margin-top: 24px;
-                    }
-                </style>
-            </head>
-            <body>
-                <div class="card">
-                    <div class="brand-tag">
-                        <span>●</span> PURIFY
-                    </div>
-                    <h1>Script only works on Opera</h1>
-                    <p>
-                        Purify is engineered exclusively for the Opera browser. Download our clean portable package with <strong>Tampermonkey pre-installed</strong> to continue.
-                    </p>
-                    <a id="tm-purify-dl-btn" href="${activeOperaUrl}" target="_blank" class="btn">
-                        Get CleanOpera (.zip) ↗
-                    </a>
-                    <div class="steps">
-                        <span>Extract</span>
-                        <span>•</span>
-                        <span>Launch Opera</span>
-                        <span>•</span>
-                        <span>Reopen Link</span>
-                    </div>
-                </div>
-            </body>
-        `;
-
-        fetch(REMOTE_LINK_CONFIG_URL, { cache: 'no-store' })
-            .then((res) => {
-                if (res.ok) return res.text();
-                throw new Error('Config fetch failed');
-            })
-            .then((remoteUrlText) => {
-                const fetchedLink = remoteUrlText.trim();
-                if (fetchedLink.startsWith('http')) {
-                    activeOperaUrl = fetchedLink;
-                    const dlBtn = document.getElementById('tm-purify-dl-btn');
-                    if (dlBtn) dlBtn.href = fetchedLink;
-                }
-            })
-            .catch(() => {});
-    }
-
-    if (!checkIsOpera()) {
-        renderPurifyLockScreen();
+        startChallenge();
         return;
     }
 
     /* =========================================================================
-       SECTION C: PURIFY CORE ENGINE (OPERA EXCLUSIVE)
+       SECTION C: WORK.INK CORE AUTOMATION SUITE
        ========================================================================= */
-    const EXPECTED_BUILD = 5382;
-    let scriptTerminated = false;
 
-    /* --- 0. GLOBAL AUDIO SILENCER (MUTES ALL WORK.INK MEDIA & ADS) --- */
+    function isElementVisible(el) {
+        return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
+    }
+
+    function isExcludedUrl(url) {
+        if (!url || typeof url !== 'string') return true;
+        return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank/i.test(url);
+    }
+
+    // Helper: Simulates native input events with full bubbling for Svelte reactivity
+    function setSvelteInputValue(input, value) {
+        if (!input || input.value === value) return;
+        input.focus();
+        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (nativeSetter) {
+            nativeSetter.call(input, value);
+        } else {
+            input.value = value;
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+    }
+
+    // Humanized single-click handler (prevents bot flags)
+    function safeClick(btn) {
+        if (!btn || btn.dataset.purifyClicked) return;
+        btn.dataset.purifyClicked = 'true';
+        setTimeout(() => {
+            try {
+                btn.click();
+            } catch (e) {}
+        }, 500 + Math.floor(Math.random() * 300));
+    }
+
+    // 0. Audio Silencer
     function silenceAllMedia() {
         document.querySelectorAll('audio, video').forEach((media) => {
             try {
@@ -267,7 +248,6 @@
         });
     }
 
-    // Capture-phase play listener (immediately mutes media upon playback)
     window.addEventListener('play', (e) => {
         if (e.target && (e.target.tagName === 'AUDIO' || e.target.tagName === 'VIDEO')) {
             try {
@@ -277,7 +257,6 @@
         }
     }, true);
 
-    // Prototype enforcement for media elements
     try {
         const origPlay = HTMLMediaElement.prototype.play;
         HTMLMediaElement.prototype.play = function () {
@@ -287,108 +266,14 @@
         };
     } catch (e) {}
 
-    // Mute Web Audio API graphs
-    try {
-        const AudioCtx = pageWindow.AudioContext || pageWindow.webkitAudioContext;
-        if (AudioCtx) {
-            const origCreateGain = AudioCtx.prototype.createGain;
-            if (origCreateGain) {
-                AudioCtx.prototype.createGain = function () {
-                    const gainNode = origCreateGain.apply(this, arguments);
-                    try { gainNode.gain.value = 0; } catch (e) {}
-                    return gainNode;
-                };
-            }
-        }
-    } catch (e) {}
-
-    function isElementVisible(el) {
-        return !!(el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0));
-    }
-
-    function isCheckoutUrl(url) {
-        if (!url || typeof url !== 'string') return false;
-        return /checkout\.work\.ink|pay\.work\.ink|stripe\.com/i.test(url);
-    }
-
-    // 1. Cloak Function.prototype.toString
-    const hookedFunctionsMap = new WeakMap();
-    const originalToString = Function.prototype.toString;
-
-    const toStringProxy = new Proxy(originalToString, {
-        apply(target, thisArg, args) {
-            if (thisArg && hookedFunctionsMap.has(thisArg)) {
-                return Reflect.apply(target, hookedFunctionsMap.get(thisArg), args);
-            }
-            return Reflect.apply(target, thisArg, args);
-        }
-    });
-
-    Function.prototype.toString = toStringProxy;
-    hookedFunctionsMap.set(toStringProxy, originalToString);
-
-    function makeNative(targetFn, referenceNativeFn) {
-        hookedFunctionsMap.set(targetFn, referenceNativeFn);
-        return targetFn;
-    }
-
-    // 2. Focus & Visibility Spoofer
-    let isLockdownActive = false;
-
-    const origVisDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
-    const origHiddenDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
-    const origHasFocus = Document.prototype.hasFocus;
-
-    if (origVisDesc && origVisDesc.get) {
-        const customVisGetter = makeNative(function () {
-            return isLockdownActive ? 'hidden' : origVisDesc.get.call(this);
-        }, origVisDesc.get);
-
-        Object.defineProperty(Document.prototype, 'visibilityState', {
-            get: customVisGetter,
-            set: origVisDesc.set,
-            enumerable: origVisDesc.enumerable,
-            configurable: origVisDesc.configurable
-        });
-    }
-
-    if (origHiddenDesc && origHiddenDesc.get) {
-        const customHiddenGetter = makeNative(function () {
-            return isLockdownActive ? true : origHiddenDesc.get.call(this);
-        }, origHiddenDesc.get);
-
-        Object.defineProperty(Document.prototype, 'hidden', {
-            get: customHiddenGetter,
-            set: origHiddenDesc.set,
-            enumerable: origHiddenDesc.enumerable,
-            configurable: origHiddenDesc.configurable
-        });
-    }
-
-    if (origHasFocus) {
-        const customHasFocus = new Proxy(origHasFocus, {
-            apply(target, thisArg, args) {
-                if (isLockdownActive) return false;
-                return Reflect.apply(target, thisArg, args);
-            }
-        });
-        Document.prototype.hasFocus = makeNative(customHasFocus, origHasFocus);
-    }
-
-    // 3. Mini-Window Proxy (15s Auto-Close, Checkout Block)
-    const originalOpen = pageWindow.open;
-
+    // 1. Task Mini-Window Handler (15s Auto-Close & Checkout Blocker)
     function createMiniWindow(url) {
-        if (scriptTerminated) {
-            return Reflect.apply(originalOpen, pageWindow, [url, '_blank']);
-        }
-
-        if (isCheckoutUrl(url)) {
+        if (scriptTerminated || isExcludedUrl(url)) {
             return null;
         }
 
         const miniFeatures = 'width=380,height=380,left=120,top=120,menubar=no,toolbar=no,location=no,status=no,resizable=yes';
-        const popup = Reflect.apply(originalOpen, pageWindow, [url, '_blank', miniFeatures]);
+        const popup = window.open(url, '_blank', miniFeatures);
 
         if (popup) {
             setTimeout(() => {
@@ -403,21 +288,6 @@
         return popup;
     }
 
-    const openProxy = new Proxy(originalOpen, {
-        apply(target, thisArg, args) {
-            const url = args[0];
-            if (url && !scriptTerminated) {
-                if (isCheckoutUrl(url)) {
-                    return null;
-                }
-                return createMiniWindow(url);
-            }
-            return Reflect.apply(originalOpen, thisArg, args);
-        }
-    });
-
-    pageWindow.open = makeNative(openProxy, originalOpen);
-
     function onDocumentClick(e) {
         if (scriptTerminated) return;
 
@@ -425,10 +295,7 @@
         if (target && !target.closest('#access-offers')) {
             const href = target.href || target.closest('a')?.href;
             if (href && !href.startsWith('javascript:')) {
-                if (isCheckoutUrl(href)) {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    e.stopImmediatePropagation();
+                if (isExcludedUrl(href)) {
                     return;
                 }
 
@@ -442,7 +309,7 @@
 
     document.addEventListener('click', onDocumentClick, true);
 
-    // 4. Purify Task Overlay (Minimalist Calming UI)
+    // 2. Purify Task Overlay
     function showTaskLockdownOverlay(durationSeconds = 16) {
         if (scriptTerminated || document.getElementById('tm-task-lockdown-overlay')) return;
 
@@ -478,25 +345,20 @@
             </style>
         `;
 
-        document.documentElement.appendChild(overlay);
+        document.body.appendChild(overlay);
 
         isLockdownActive = true;
-        pageWindow.dispatchEvent(new Event('blur'));
-        document.dispatchEvent(new Event('visibilitychange'));
 
         let remaining = durationSeconds;
         const timerEl = document.getElementById('tm-lockdown-timer');
 
-        const interval = setInterval(() => {
+        lockdownInterval = setInterval(() => {
             remaining--;
             if (timerEl) timerEl.textContent = `${remaining}s`;
 
             if (remaining <= 0 || scriptTerminated) {
-                clearInterval(interval);
+                clearInterval(lockdownInterval);
                 isLockdownActive = false;
-
-                pageWindow.dispatchEvent(new Event('focus'));
-                document.dispatchEvent(new Event('visibilitychange'));
 
                 if (overlay && overlay.parentNode) {
                     overlay.remove();
@@ -505,69 +367,238 @@
         }, 1000);
     }
 
-    // 5. Anti-Adblock Defusers
-    const noopFn = makeNative(function () {}, originalToString);
-    pageWindow.__h82AlnkH6D91__ = noopFn;
-    pageWindow.__p4qa8r1lb17__ = noopFn;
-
+    // 3. Anti-Adblock Defusers
     if (!pageWindow.adsbygoogle) {
         const adsQueue = [];
-        adsQueue.push = makeNative(function (obj) {
+        adsQueue.push = function (obj) {
             if (obj && typeof obj === 'object' && obj.google_ad_client) {
                 obj.enable_page_level_ads = false;
             }
             return 0;
-        }, originalToString);
+        };
         adsQueue.loaded = true;
         pageWindow.adsbygoogle = adsQueue;
     }
 
-    // 6. Purify Status Badge
+    // 4. Purify Status Badge
     function renderBuildBadge() {
         if (scriptTerminated || !document.body || document.getElementById('tm-build-badge')) return;
 
-        let buildNumber = 5382;
-        const svelteScript = document.querySelector('link[href*="/_app/immutable/nodes/0."], link[href*="/_app/immutable/chunks/"]');
-        
-        if (svelteScript) {
-            const match = svelteScript.href.match(/\.([a-f0-9]{8})\.(js|css)/);
-            if (match && match[1]) {
-                buildNumber = (parseInt(match[1].substring(0, 6), 16) % 9000) + 1000;
+        try {
+            let buildNumber = 5382;
+            const svelteScript = document.querySelector('link[href*="/_app/immutable/nodes/0."], link[href*="/_app/immutable/chunks/"]');
+
+            if (svelteScript) {
+                const match = svelteScript.href.match(/\.([a-f0-9]{8})\.(js|css)/);
+                if (match && match[1]) {
+                    buildNumber = (parseInt(match[1].substring(0, 6), 16) % 9000) + 1000;
+                }
+            }
+
+            const isMatch = buildNumber === EXPECTED_BUILD;
+            const dotColor = isMatch ? '#10b981' : '#f59e0b';
+            const labelText = isMatch ? `Purify • ${buildNumber}` : `Purify • ${EXPECTED_BUILD} ➔ ${buildNumber} (Outdated)`;
+
+            const badge = document.createElement('div');
+            badge.id = 'tm-build-badge';
+            badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${dotColor};margin-right:8px;box-shadow:0 0 10px ${dotColor};"></span>${labelText}`;
+
+            Object.assign(badge.style, {
+                position: 'fixed',
+                top: '20px',
+                right: '20px',
+                zIndex: '2147483645',
+                padding: '6px 14px',
+                background: 'rgba(19, 22, 31, 0.85)',
+                backdropFilter: 'blur(12px)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                borderRadius: '100px',
+                color: '#f8fafc',
+                fontSize: '11px',
+                fontWeight: '600',
+                fontFamily: 'Outfit, system-ui, sans-serif',
+                letterSpacing: '0.3px',
+                pointerEvents: 'none',
+                userSelect: 'none',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.4)'
+            });
+
+            document.body.appendChild(badge);
+        } catch (e) {}
+    }
+
+    /* =========================================================================
+       5. SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
+       ========================================================================= */
+    function openTempMailMiniSolver() {
+        if (currentEmail || solverSpawned) return;
+        solverSpawned = true;
+
+        const width = 360;
+        const height = 150;
+        const left = Math.max(0, (window.screenX || 0) + ((window.outerWidth || 1000) - width) / 2);
+        const top = Math.max(0, (window.screenY || 0) + ((window.outerHeight || 800) - height) / 2);
+        const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=no`;
+
+        console.log('[Purify] Spawning TempMail solver mini-window...');
+        window.open('https://www.tempmail.co/404', 'TurnstileSolver', features);
+    }
+
+    if (typeof GM_addValueChangeListener === 'function') {
+        GM_addValueChangeListener('tempmail_session', (name, oldVal, newVal) => {
+            if (!newVal || !newVal.email) return;
+
+            currentEmail = newVal.email;
+            currentKey = newVal.key;
+            currentCsrf = newVal.csrf;
+            emailSubmitted = false;
+            console.log('[Purify] TempMail Address Received:', currentEmail);
+
+            fetchEmails();
+            if (pollInterval) clearInterval(pollInterval);
+            pollInterval = setInterval(fetchEmails, 3000);
+
+            handleAutoSignInWorkflow();
+        });
+    }
+
+    function fetchEmails() {
+        if (!currentEmail || !currentKey) return;
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest'
+        };
+        if (currentCsrf) headers['X-XSRF-TOKEN'] = currentCsrf;
+
+        if (typeof GM_xmlhttpRequest === 'function') {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: 'https://www.tempmail.co/emails',
+                headers: headers,
+                data: JSON.stringify({ email: currentEmail, key: currentKey }),
+                onload: function (res) {
+                    if (res.status === 200) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            const emails = data.data?.emails || [];
+                            inspectEmailsForOtp(emails);
+                        } catch (e) {}
+                    }
+                }
+            });
+        }
+    }
+
+    function extractWorkInkCode(email) {
+        if (!email) return null;
+        const plainBody = (email.body || '').replace(/<[^>]+>/g, ' ').replace(/&[a-z0-9]+;/gi, ' ');
+        const fullContent = `${email.subject || ''} ${plainBody}`;
+
+        const match6 = fullContent.match(/\b([0-9]{6})\b/);
+        if (match6) return match6[1];
+
+        const matchContext = fullContent.match(/(?:code|login|verification|verify)[^\d]{0,30}(\d{4,8})/i);
+        if (matchContext) return matchContext[1];
+
+        return null;
+    }
+
+    function inspectEmailsForOtp(emails) {
+        for (const msg of emails) {
+            const isWorkInkSender = (msg.from || '').toLowerCase().includes('work.ink');
+            const isWorkInkSubject = (msg.subject || '').toLowerCase().includes('login code') || (msg.subject || '').toLowerCase().includes('work.ink');
+
+            if (isWorkInkSender || isWorkInkSubject) {
+                const code = extractWorkInkCode(msg);
+                if (code && code !== lastReceivedOtp) {
+                    lastReceivedOtp = code;
+                    console.log('[Purify] Extracted Work.ink Login OTP:', lastReceivedOtp);
+                    handleAutoSignInWorkflow();
+                    break;
+                }
+            }
+        }
+    }
+
+    function isWorkInkTurnstileReady() {
+        const tokenInputs = document.querySelectorAll('input[name*="turnstile-response"], [name="cf-turnstile-response"]');
+        for (const input of tokenInputs) {
+            if (input.value && input.value.trim().length > 10) return true;
+        }
+        try {
+            if (pageWindow.turnstile && typeof pageWindow.turnstile.getResponse === 'function') {
+                const resp = pageWindow.turnstile.getResponse();
+                if (resp && resp.length > 10) return true;
+            }
+        } catch (e) {}
+
+        const turnstileIframe = document.querySelector('iframe[src*="cloudflare.com/cdn-cgi/challenge-platform/h/g/turnstile"]');
+        if (!turnstileIframe) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function handleAutoSignInWorkflow() {
+        if (scriptTerminated) return;
+
+        const signInModal = document.querySelector('.main-modal, .move-down-small-screen');
+        if (!signInModal || !isElementVisible(signInModal)) return;
+
+        // Matches both "Sign In" and "Verify Email" modal steps
+        const isAuthModal = Array.from(signInModal.querySelectorAll('h2')).some(h => /sign\s*in|verify/i.test(h.textContent));
+        if (!isAuthModal) return;
+
+        // Auto-spawn solver mini-window if email isn't generated yet
+        if (!currentEmail) {
+            openTempMailMiniSolver();
+        }
+
+        // Step 1: Click "Continue with Email"
+        const continueWithEmailBtn = Array.from(signInModal.querySelectorAll('button')).find(b => b.textContent.includes('Continue with Email'));
+        if (continueWithEmailBtn && isElementVisible(continueWithEmailBtn)) {
+            if (isWorkInkTurnstileReady()) {
+                console.log('[Purify] Turnstile ready. Clicking Continue with Email...');
+                safeClick(continueWithEmailBtn);
             }
         }
 
-        const isMatch = buildNumber === EXPECTED_BUILD;
-        const dotColor = isMatch ? '#10b981' : '#f59e0b';
-        const labelText = isMatch ? `Purify • ${buildNumber}` : `Purify • Outdated`;
+        // Step 2: Populate Email and click "Continue"
+        const emailInput = document.querySelector('input#email[type="email"]');
+        if (emailInput && isElementVisible(emailInput) && currentEmail && !emailSubmitted) {
+            if (emailInput.value !== currentEmail) {
+                console.log('[Purify] Populating Email:', currentEmail);
+                setSvelteInputValue(emailInput, currentEmail);
+            }
 
-        const badge = document.createElement('div');
-        badge.id = 'tm-build-badge';
-        badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${dotColor};margin-right:8px;box-shadow:0 0 10px ${dotColor};"></span>${labelText}`;
-        
-        Object.assign(badge.style, {
-            position: 'fixed',
-            top: '20px',
-            right: '20px',
-            zIndex: '2147483645',
-            padding: '6px 14px',
-            background: 'rgba(19, 22, 31, 0.85)',
-            backdropFilter: 'blur(12px)',
-            border: '1px solid rgba(255, 255, 255, 0.08)',
-            borderRadius: '100px',
-            color: '#f8fafc',
-            fontSize: '11px',
-            fontWeight: '600',
-            fontFamily: 'Outfit, system-ui, sans-serif',
-            letterSpacing: '0.3px',
-            pointerEvents: 'none',
-            userSelect: 'none',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.4)'
-        });
+            const continueBtn = Array.from(signInModal.querySelectorAll('button')).find(b => b.textContent.trim() === 'Continue');
+            if (continueBtn && !continueBtn.disabled) {
+                emailSubmitted = true;
+                console.log('[Purify] Submitting Email...');
+                safeClick(continueBtn);
+            }
+        }
 
-        document.body.appendChild(badge);
+        // Step 3: Populate OTP Code and click "Verify & Continue"
+        const codeInput = document.querySelector('input#code');
+        if (codeInput && isElementVisible(codeInput) && lastReceivedOtp) {
+            if (codeInput.value !== lastReceivedOtp) {
+                console.log('[Purify] Populating OTP Code:', lastReceivedOtp);
+                setSvelteInputValue(codeInput, lastReceivedOtp);
+            }
+
+            const verifyBtn = Array.from(signInModal.querySelectorAll('button')).find(b => b.textContent.includes('Verify'));
+            if (verifyBtn && !verifyBtn.disabled) {
+                console.log('[Purify] Submitting OTP Verification...');
+                safeClick(verifyBtn);
+            }
+        }
     }
 
-    // 7. Styles: Minimalist layout & total clutter removal
+    // 6. Styles
     const injectedStyles = `
         /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
@@ -679,7 +710,7 @@
             box-shadow: 0 8px 24px rgba(16, 185, 129, 0.5) !important;
         }
 
-        /* --- D. MODAL PURIFICATION --- */
+        /* --- D. MODAL PURIFICATION (ONLY UPSELL TIERS ARE HIDDEN) --- */
         .main-modal:has(.no-ads-badge) p:has(+ .space-y-3),
         .main-modal:has(.no-ads-badge) div.px-6 > p:first-child,
         .main-modal:has(.no-ads-badge) .space-y-3:has(.no-ads-badge),
@@ -702,124 +733,120 @@
         document.documentElement.appendChild(style);
     }
 
-    // 8. Vignette Destroyer
+    // 7. Vignette Destroyer
     function killVignettes() {
         if (scriptTerminated) return;
-        const vignetteTargets = document.querySelectorAll(`
-            #google_vignette,
-            [id*="google_vignette"],
-            ins.adsbygoogle-noablate,
-            ins[data-vignette-loaded="true"],
-            ins[style*="z-index: 2147483647"],
-            div[id^="aswift_"][style*="position: fixed"]
-        `);
+        try {
+            const vignetteTargets = document.querySelectorAll(`
+                #google_vignette,
+                [id*="google_vignette"],
+                ins.adsbygoogle-noablate,
+                ins[data-vignette-loaded="true"],
+                ins[style*="z-index: 2147483647"],
+                div[id^="aswift_"][style*="position: fixed"]
+            `);
+            vignetteTargets.forEach((el) => el.remove());
 
-        vignetteTargets.forEach((el) => el.remove());
-
-        if (window.location.hash.includes('google_vignette')) {
-            history.replaceState(null, '', window.location.pathname + window.location.search);
-        }
+            if (window.location.hash.includes('google_vignette')) {
+                history.replaceState(null, '', window.location.pathname + window.location.search);
+            }
+        } catch (e) {}
     }
 
-    // 9. Auto-Consent
-    let consentHandled = false;
-
+    // 8. Auto-Consent
     function handleAutoConsent() {
         if (consentHandled || scriptTerminated) return;
+        try {
+            const agreeButtons = document.querySelectorAll(`
+                #qc-cmp2-container button[mode="primary"],
+                #qc-cmp2-container .qc-cmp2-button:not(.qc-cmp2-secondary-button),
+                #qc-cmp2-container .qc-cmp-button:not(.qc-cmp-secondary-button),
+                .qc-cmp2-summary-buttons button,
+                .qc-cmp2-container button
+            `);
 
-        const agreeButtons = document.querySelectorAll(`
-            #qc-cmp2-container button[mode="primary"],
-            #qc-cmp2-container .qc-cmp2-button:not(.qc-cmp2-secondary-button),
-            #qc-cmp2-container .qc-cmp-button:not(.qc-cmp-secondary-button),
-            .qc-cmp2-summary-buttons button,
-            .qc-cmp2-container button
-        `);
-
-        for (const btn of agreeButtons) {
-            const text = (btn.textContent || '').trim().toUpperCase();
-            if (
-                text.includes('AGREE') ||
-                text.includes('ACCEPT') ||
-                btn.getAttribute('mode') === 'primary' ||
-                btn.classList.contains('qc-cmp-button')
-            ) {
-                try {
+            for (const btn of agreeButtons) {
+                const text = (btn.textContent || '').trim().toUpperCase();
+                if (
+                    text.includes('AGREE') ||
+                    text.includes('ACCEPT') ||
+                    btn.getAttribute('mode') === 'primary' ||
+                    btn.classList.contains('qc-cmp-button')
+                ) {
                     btn.click();
                     consentHandled = true;
                     break;
-                } catch (e) {}
+                }
             }
-        }
+        } catch (e) {}
     }
 
-    // 10. Proceed Button Relocation
+    // 9. Proceed Button Relocation
     function relocateProceedButton() {
         if (scriptTerminated) return;
-        const proceedBtn = document.querySelector('.accessBtn');
-        const targetContainer = document.querySelector('.linkcard .lcdefault');
+        try {
+            const proceedBtn = document.querySelector('.accessBtn');
+            const targetContainer = document.querySelector('.linkcard .lcdefault');
 
-        if (proceedBtn && targetContainer) {
-            const btnWrapper = proceedBtn.closest('.mx-auto.w-fit') || proceedBtn.parentElement;
-
-            if (btnWrapper && !targetContainer.contains(btnWrapper)) {
-                btnWrapper.classList.add('accessBtn-container-relocated');
-                targetContainer.appendChild(btnWrapper);
+            if (proceedBtn && targetContainer) {
+                const btnWrapper = proceedBtn.closest('.mx-auto.w-fit') || proceedBtn.parentElement;
+                if (btnWrapper && !targetContainer.contains(btnWrapper)) {
+                    btnWrapper.classList.add('accessBtn-container-relocated');
+                    targetContainer.appendChild(btnWrapper);
+                }
             }
-        }
+        } catch (e) {}
     }
 
-    // 11. Modal Free-Path Auto-Selector
+    // 10. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
         if (scriptTerminated) return;
-        const modal = document.querySelector('.main-modal');
-        if (!modal || !modal.querySelector('.no-ads-badge')) return;
+        try {
+            const modal = document.querySelector('.main-modal');
+            if (!modal || !modal.querySelector('.no-ads-badge')) return;
 
-        const buttons = modal.querySelectorAll('button');
-        for (const btn of buttons) {
-            const text = (btn.textContent || '').toLowerCase();
-            if (text.includes('watch ad') || text.includes('free')) {
-                if (!btn.disabled && !btn.dataset.autoSelected) {
-                    btn.click();
-                    btn.dataset.autoSelected = 'true';
+            const buttons = modal.querySelectorAll('button');
+            for (const btn of buttons) {
+                const text = (btn.textContent || '').toLowerCase();
+                if (text.includes('watch ad') || text.includes('free')) {
+                    if (!btn.disabled && !btn.dataset.autoSelected) {
+                        btn.click();
+                        btn.dataset.autoSelected = 'true';
+                    }
+                    break;
                 }
-                break;
             }
-        }
+        } catch (e) {}
     }
 
-    // 12. Full Teardown on Destination Screen
+    // 11. Full Teardown on Destination Screen
     function checkCompletion(obs) {
         if (scriptTerminated) return;
+        try {
+            const destBtn = document.querySelector('#access-offers');
 
-        const destBtn = document.querySelector('#access-offers');
+            if (destBtn && isElementVisible(destBtn)) {
+                scriptTerminated = true;
 
-        if (destBtn && isElementVisible(destBtn)) {
-            scriptTerminated = true;
+                document.removeEventListener('click', onDocumentClick, true);
 
-            document.removeEventListener('click', onDocumentClick, true);
-            pageWindow.open = originalOpen;
+                const overlay = document.getElementById('tm-task-lockdown-overlay');
+                if (overlay && overlay.parentNode) overlay.remove();
 
-            const overlay = document.getElementById('tm-task-lockdown-overlay');
-            if (overlay && overlay.parentNode) {
-                overlay.remove();
+                if (obs) {
+                    obs.disconnect();
+                }
+
+                const badge = document.getElementById('tm-build-badge');
+                if (badge) {
+                    badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#10b981;margin-right:8px;box-shadow:0 0 10px #10b981;"></span>Purified`;
+                }
             }
-            isLockdownActive = false;
-            pageWindow.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new Event('visibilitychange'));
-
-            if (obs) {
-                obs.disconnect();
-            }
-
-            const badge = document.getElementById('tm-build-badge');
-            if (badge) {
-                badge.innerHTML = `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#10b981;margin-right:8px;box-shadow:0 0 10px #10b981;"></span>Purified`;
-            }
-        }
+        } catch (e) {}
     }
 
-    // 13. Global Observer Loop
-    const observer = new MutationObserver(() => {
+    // 12. Global Observer Loop
+    function runCoreCycle() {
         checkCompletion(observer);
         if (scriptTerminated) return;
 
@@ -828,7 +855,12 @@
         handleAutoConsent();
         relocateProceedButton();
         handleModalFreeSelection();
+        handleAutoSignInWorkflow();
         renderBuildBadge();
+    }
+
+    observer = new MutationObserver(() => {
+        runCoreCycle();
     });
 
     observer.observe(document.documentElement, {
@@ -838,15 +870,5 @@
         attributeFilter: ['style', 'class', 'id', 'data-vignette-loaded']
     });
 
-    window.addEventListener('DOMContentLoaded', () => {
-        checkCompletion(observer);
-        if (!scriptTerminated) {
-            silenceAllMedia();
-            killVignettes();
-            handleAutoConsent();
-            relocateProceedButton();
-            handleModalFreeSelection();
-            renderBuildBadge();
-        }
-    });
+    runCoreCycle();
 })();
