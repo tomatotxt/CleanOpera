@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      69.0
+// @version      69.6
 // @description  A simplistic link automation, ad defusal, audio silencer & native modal text swapper suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
@@ -31,6 +31,7 @@
     const FALLBACK_OPERA_URL = 'https://www.mediafire.com/file/ceqhbc7yl5nmoe4/CleanOpera.zip/file';
     const REMOTE_LINK_CONFIG_URL = 'https://raw.githubusercontent.com/tomatotxt/CleanOpera/raw/refs/heads/main/cleanoperalink';
     const TEMPMAIL_TURNSTILE_SITEKEY = '0x4AAAAAAA_d4Z0H2NTOXki1';
+    const OPERA_SPOOFER_RELEASE_URL = 'https://github.com/tomatotxt/operaspoofer/releases/tag/v';
 
     let activeOperaUrl = FALLBACK_OPERA_URL;
     let scriptTerminated = false;
@@ -47,6 +48,33 @@
     let lastReceivedOtp = null;
     let emailSubmitted = false;
     let solverSpawned = false;
+
+    let trackedPopups = [];
+
+    /* =========================================================================
+       POPUP CLEANUP ENGINE
+       ========================================================================= */
+    function closeTrackedPopup(popup) {
+        if (!popup) return;
+        try {
+            if (!popup.closed) {
+                popup.close();
+            }
+        } catch (e) {}
+    }
+
+    function schedulePopupClose(popup, delayMs) {
+        if (!popup) return;
+
+        trackedPopups.push(popup);
+
+        const retryIntervals = [delayMs, delayMs + 500, delayMs + 1500, delayMs + 3000];
+        retryIntervals.forEach((time) => {
+            setTimeout(() => {
+                closeTrackedPopup(popup);
+            }, time);
+        });
+    }
 
     /* =========================================================================
        OPERA BROWSER VERIFICATION & GATEKEEPER
@@ -76,14 +104,19 @@
         }
     }
 
-    function showNonOperaOverlay() {
-        if (document.getElementById('purify-opera-required-overlay')) return;
+    function showNonOperaOverlay(onProceedAnyway) {
+        let existing = document.getElementById('purify-opera-required-overlay');
+        if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+        }
 
         const overlay = document.createElement('div');
         overlay.id = 'purify-opera-required-overlay';
         Object.assign(overlay.style, {
             position: 'fixed',
             inset: '0',
+            width: '100vw',
+            height: '100vh',
             zIndex: '2147483647',
             backgroundColor: 'rgba(9, 10, 15, 0.96)',
             backdropFilter: 'blur(20px)',
@@ -94,52 +127,87 @@
             color: '#f8fafc',
             fontFamily: 'Outfit, system-ui, -apple-system, sans-serif',
             userSelect: 'none',
-            padding: '20px'
+            padding: '20px',
+            pointerEvents: 'auto'
         });
 
         overlay.innerHTML = `
-            <div style="background: rgba(19, 22, 31, 0.95); border: 1px solid rgba(239, 68, 68, 0.3); padding: 40px 48px; border-radius: 28px; text-align: center; max-width: 460px; box-shadow: 0 30px 70px rgba(0,0,0,0.8);">
-                <div style="width: 56px; height: 56px; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 24px auto;">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <div style="background: rgba(19, 22, 31, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); padding: 36px 40px; border-radius: 24px; text-align: center; max-width: 480px; box-shadow: 0 30px 70px rgba(0,0,0,0.8); pointer-events: auto;">
+                <div style="width: 52px; height: 52px; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 16px; display: flex; align-items: center; justify-content: center; margin: 0 auto 20px auto;">
+                    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="10"></circle>
-                        <line x1="12" y1="8" x2="12" y2="12"></line>
-                        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
                     </svg>
                 </div>
-                <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0 0 10px 0; color: #f8fafc; letter-spacing: -0.4px;">Opera Browser Required</h2>
-                <p style="font-size: 0.925rem; color: #94a3b8; margin: 0 0 28px 0; line-height: 1.6; font-weight: 300;">
-                    The <strong style="color: #f8fafc; font-weight: 600;">Purify Automation Suite</strong> is designed exclusively for Opera Browser. Please download and install <strong>CleanOpera</strong> to access this link.
+                
+                <h2 style="font-size: 1.4rem; font-weight: 700; margin: 0 0 8px 0; color: #f8fafc; letter-spacing: -0.4px;">Browser Optimization Notice</h2>
+                <p style="font-size: 0.875rem; color: #94a3b8; margin: 0 0 20px 0; line-height: 1.5; font-weight: 300;">
+                    Purify is optimized for Opera. You can use our pre-configured portable Opera build, download official Opera, or attempt running the script in your current browser.
                 </p>
-                <a href="${activeOperaUrl}" target="_blank" id="purify-download-opera-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 14px 24px; background: #10b981; color: #ffffff; font-weight: 600; font-size: 0.95rem; border-radius: 14px; text-decoration: none; box-shadow: 0 6px 20px rgba(16, 185, 129, 0.35); transition: all 0.2s ease;">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                        <polyline points="7 10 12 15 17 10"></polyline>
-                        <line x1="12" y1="15" x2="12" y2="3"></line>
-                    </svg>
-                    Download CleanOpera
-                </a>
+
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <a href="${activeOperaUrl}" target="_blank" id="purify-download-opera-btn" style="display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; padding: 12px 16px; background: #10b981; color: #ffffff; border-radius: 12px; text-decoration: none; box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3); transition: background 0.2s ease; box-sizing: border-box;">
+                        <span style="font-weight: 600; font-size: 0.9rem;">Download Portable CleanOpera (.zip)</span>
+                        <span style="font-size: 0.75rem; opacity: 0.85; font-weight: 300;">Pre-configured standalone environment</span>
+                    </a>
+
+                    <a href="https://www.opera.com/download" target="_blank" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 11px 16px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); color: #cbd5e1; font-weight: 500; font-size: 0.85rem; border-radius: 12px; text-decoration: none; box-sizing: border-box;">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                        Official Opera Download Page
+                    </a>
+
+                    <button id="purify-proceed-anyway-btn" type="button" style="width: 100%; padding: 12px 16px; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); color: #f8fafc; font-weight: 600; font-size: 0.85rem; border-radius: 12px; cursor: pointer; margin-top: 4px; pointer-events: auto;">
+                        Continue in current browser (Unoptimized)
+                    </button>
+                </div>
             </div>
         `;
 
-        if (document.body) {
-            document.body.appendChild(overlay);
-        } else {
-            document.addEventListener('DOMContentLoaded', () => document.body.appendChild(overlay));
-        }
-    }
+        function handleDismiss(e) {
+            if (e && e.target && e.target.closest('#purify-proceed-anyway-btn')) {
+                if (e.preventDefault) e.preventDefault();
+                if (e.stopPropagation) e.stopPropagation();
 
-    // Check Opera compatibility on Work.ink
-    if (window.location.hostname.includes('work.ink')) {
-        fetchRemoteConfig();
-        if (!isOperaBrowser()) {
-            console.warn('[Purify] Non-Opera browser detected. Prompting CleanOpera download...');
-            showNonOperaOverlay();
-            return; // Terminate further script execution on non-Opera browsers
+                const el = document.getElementById('purify-opera-required-overlay');
+                if (el && el.parentNode) {
+                    el.parentNode.removeChild(el);
+                } else if (overlay && overlay.parentNode) {
+                    overlay.parentNode.removeChild(overlay);
+                }
+
+                if (typeof onProceedAnyway === 'function') {
+                    const cb = onProceedAnyway;
+                    onProceedAnyway = null;
+                    cb();
+                }
+            }
+        }
+
+        overlay.addEventListener('click', handleDismiss, true);
+        overlay.addEventListener('pointerdown', handleDismiss, true);
+
+        const attach = () => {
+            const target = document.body || document.documentElement;
+            if (target && !document.getElementById('purify-opera-required-overlay')) {
+                target.appendChild(overlay);
+            }
+        };
+
+        if (document.body) {
+            attach();
+        } else {
+            window.addEventListener('DOMContentLoaded', attach, { once: true });
+            setTimeout(attach, 50);
         }
     }
 
     /* =========================================================================
-       SECTION 0: TOTAL PRISTINE STATE INITIALIZER (COOKIES + LOCALSTORAGE)
+       SECTION 0: FIREFOX-COMPATIBLE PRISTINE STATE INITIALIZER
        ========================================================================= */
     function clearPristineState() {
         try {
@@ -151,17 +219,39 @@
                 sessionStorage.clear();
             }
 
-            if (window.indexedDB && typeof window.indexedDB.databases === 'function') {
-                window.indexedDB.databases().then((dbs) => {
-                    dbs.forEach((db) => {
-                        if (db.name) window.indexedDB.deleteDatabase(db.name);
-                    });
-                }).catch(() => {});
+            const knownDbs = ['workink', 'svelte', 'firebaseLocalStorageDb', 'work.ink', 'app', 'keyval-store'];
+            if (window.indexedDB) {
+                if (typeof window.indexedDB.databases === 'function') {
+                    window.indexedDB.databases().then((dbs) => {
+                        dbs.forEach((db) => {
+                            if (db.name) window.indexedDB.deleteDatabase(db.name);
+                        });
+                    }).catch(() => {});
+                }
+                knownDbs.forEach((dbName) => {
+                    try { window.indexedDB.deleteDatabase(dbName); } catch (e) {}
+                });
             }
 
             const cookies = document.cookie.split(';');
             const host = window.location.hostname;
-            const rootDomain = '.' + host.replace(/^www\./, '');
+            const hostParts = host.split('.');
+            const domains = ['', host, '.' + host];
+
+            for (let i = 0; i < hostParts.length - 1; i++) {
+                domains.push('.' + hostParts.slice(i).join('.'));
+            }
+
+            const paths = ['/', ''];
+            const currentPathParts = window.location.pathname.split('/');
+            let accumulatedPath = '';
+            for (const part of currentPathParts) {
+                if (part) {
+                    accumulatedPath += '/' + part;
+                    paths.push(accumulatedPath);
+                    paths.push(accumulatedPath + '/');
+                }
+            }
 
             for (let i = 0; i < cookies.length; i++) {
                 const cookie = cookies[i];
@@ -169,22 +259,21 @@
                 const name = eqPos > -1 ? cookie.substring(0, eqPos).trim() : cookie.trim();
 
                 if (name) {
-                    const expires = 'expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
-                    document.cookie = `${name}=; ${expires}`;
-                    document.cookie = `${name}=; ${expires}; domain=${host}`;
-                    document.cookie = `${name}=; ${expires}; domain=${rootDomain}`;
-                    document.cookie = `${name}=; ${expires}; domain=.work.ink`;
+                    const expires = 'expires=Thu, 01 Jan 1970 00:00:00 GMT';
+                    domains.forEach((d) => {
+                        paths.forEach((p) => {
+                            const domAttr = d ? `; domain=${d}` : '';
+                            const pathAttr = p ? `; path=${p}` : '';
+                            document.cookie = `${name}=; ${expires}${domAttr}${pathAttr}`;
+                        });
+                    });
                 }
             }
         } catch (e) {}
     }
 
-    if (window.location.hostname.includes('work.ink')) {
-        clearPristineState();
-    }
-
     /* =========================================================================
-       SECTION A: MEDIAFIRE AUTO-DOWNLOADER & TAB CLOSER
+       SECTION A: MEDIAFIRE AUTO-DOWNLOADER
        ========================================================================= */
     if (window.location.hostname.includes('mediafire.com')) {
         let downloadInitiated = false;
@@ -239,7 +328,7 @@
     }
 
     /* =========================================================================
-       SECTION B: TEMPMAIL.CO SOLVER POPUP (CAPTCHA & EMAIL CREATOR)
+       SECTION B: TEMPMAIL.CO SOLVER POPUP
        ========================================================================= */
     if (window.location.hostname === 'www.tempmail.co' && window.location.pathname.startsWith('/404')) {
         document.title = "Purify • Verification";
@@ -347,6 +436,10 @@
         return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank/i.test(url);
     }
 
+    function isOperaDownloadOffer(url) {
+        return typeof url === 'string' && url.includes('opera-download.work.ink');
+    }
+
     function isSocialLink(url) {
         if (!url || typeof url !== 'string') return false;
         return /discord\.(com|gg)|youtube\.com|youtu\.be|twitter\.com|x\.com|instagram\.com|facebook\.com|tiktok\.com|t\.me|telegram\.org/i.test(url);
@@ -378,7 +471,6 @@
         }, 500 + Math.floor(Math.random() * 300));
     }
 
-    // 0. Audio Silencer
     function silenceAllMedia() {
         document.querySelectorAll('audio, video').forEach((media) => {
             try {
@@ -406,24 +498,76 @@
         };
     } catch (e) {}
 
-    // 1. PERMANENT Task Mini-Window Handler & Window.open Hook Engine
     const originalOpen = pageWindow.open;
 
+    function showOperaSpooferModal(targetUrl) {
+        if (document.getElementById('purify-opera-spoofer-modal')) return;
+
+        const modal = document.createElement('div');
+        modal.id = 'purify-opera-spoofer-modal';
+        Object.assign(modal.style, {
+            position: 'fixed',
+            inset: '0',
+            zIndex: '2147483647',
+            backgroundColor: 'rgba(9, 10, 15, 0.92)',
+            backdropFilter: 'blur(16px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+            fontFamily: 'Outfit, system-ui, sans-serif',
+            color: '#f8fafc'
+        });
+
+        modal.innerHTML = `
+            <div style="background: rgba(19, 22, 31, 0.95); border: 1px solid rgba(255, 255, 255, 0.1); padding: 32px; border-radius: 20px; max-width: 440px; text-align: center; box-shadow: 0 20px 50px rgba(0,0,0,0.8);">
+                <h3 style="margin: 0 0 10px 0; font-size: 1.25rem; font-weight: 700;">Opera Offer Task Detected</h3>
+                <p style="font-size: 0.875rem; color: #94a3b8; margin: 0 0 20px 0; line-height: 1.5;">
+                    This task requires an Opera installation. Choose how you would like to handle this offer:
+                </p>
+                <div style="display: flex; flex-direction: column; gap: 10px;">
+                    <button id="spoofer-btn-install" style="padding: 12px; background: #3b82f6; color: #fff; border: none; border-radius: 12px; font-weight: 600; cursor: pointer;">
+                        Install Opera Normally to Complete Offer
+                    </button>
+                    <button id="spoofer-btn-spoofer" style="padding: 12px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: #cbd5e1; border-radius: 12px; font-weight: 600; cursor: pointer;">
+                        Use Opera Spoofer Tool
+                    </button>
+                    <button id="spoofer-btn-cancel" style="padding: 8px; background: transparent; border: none; color: #64748b; font-size: 0.8rem; cursor: pointer; margin-top: 4px;">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        document.getElementById('spoofer-btn-install').addEventListener('click', () => {
+            if (modal.parentNode) modal.parentNode.removeChild(modal);
+            originalOpen.call(pageWindow, targetUrl, '_blank');
+        });
+
+        document.getElementById('spoofer-btn-spoofer').addEventListener('click', () => {
+            if (modal.parentNode) modal.parentNode.removeChild(modal);
+            originalOpen.call(pageWindow, OPERA_SPOOFER_RELEASE_URL, '_blank');
+        });
+
+        document.getElementById('spoofer-btn-cancel').addEventListener('click', () => {
+            if (modal.parentNode) modal.parentNode.removeChild(modal);
+        });
+    }
+
     function createTaskMiniWindow(url) {
+        if (isOperaDownloadOffer(url)) {
+            showOperaSpooferModal(url);
+            return null;
+        }
+
         if (isExcludedFromIntercept(url)) {
             return originalOpen.call(pageWindow, url, '_blank');
         }
 
         const miniFeatures = 'width=380,height=380,left=120,top=120,menubar=no,toolbar=no,location=no,status=no,resizable=yes';
         const popup = originalOpen.call(pageWindow, url, '_blank', miniFeatures);
-
-        if (popup) {
-            setTimeout(() => {
-                try {
-                    if (!popup.closed) popup.close();
-                } catch (e) {}
-            }, 5000);
-        }
 
         const isSocial = isSocialLink(url);
         const baseSeconds = isSocial ? 5 : 15;
@@ -432,11 +576,15 @@
             : Number((Math.random() * 1.1 + 0.1).toFixed(1));
         const totalDurationSec = Math.ceil(baseSeconds + randomJitterSec);
 
+        const closeDelayMs = isSocial ? 3500 : 5000;
+        if (popup) {
+            schedulePopupClose(popup, closeDelayMs);
+        }
+
         showTaskLockdownOverlay(totalDurationSec, isSocial ? 'Social Media Link' : 'Sponsored Task');
         return popup;
     }
 
-    // Window.open Proxy Interceptor
     function openProxy(url, target, features) {
         if (url && typeof url === 'string' && !isExcludedFromIntercept(url)) {
             console.log('[Purify] Intercepted programmatic window.open:', url);
@@ -455,8 +603,12 @@
     }
 
     function onDocumentClick(e) {
+        if (e.target.closest('#purify-opera-required-overlay, #purify-opera-spoofer-modal, #access-offers, #tm-build-badge, #tm-task-lockdown-overlay')) {
+            return;
+        }
+
         const target = e.target.closest('.cta-btn, button:has(.arrow-nudge), button:has(svg), a[target="_blank"], a[href*="/api/"]');
-        if (target && !target.closest('#access-offers, #tm-build-badge, #tm-task-lockdown-overlay')) {
+        if (target) {
             const href = target.href || target.closest('a')?.href;
             if (href && !href.startsWith('javascript:')) {
                 if (isExcludedFromIntercept(href)) {
@@ -473,7 +625,6 @@
 
     document.addEventListener('click', onDocumentClick, true);
 
-    // 2. Purify Task Overlay & Work.ink Native .modalwrapper Text Swapper
     function removeLockdownOverlay() {
         if (lockdownInterval) {
             clearInterval(lockdownInterval);
@@ -481,9 +632,12 @@
         }
         isLockdownActive = false;
 
+        trackedPopups.forEach(closeTrackedPopup);
+        trackedPopups = [];
+
         const overlay = document.getElementById('tm-task-lockdown-overlay');
         if (overlay && overlay.parentNode) {
-            overlay.remove();
+            overlay.parentNode.removeChild(overlay);
         }
 
         try {
@@ -502,7 +656,6 @@
 
     function updateNativeWorkInkOverlayText(remainingSec, taskTypeLabel) {
         try {
-            // Target Work.ink's native .modalwrapper elements directly
             const modalTitle = document.querySelector('.modalwrapper .title, .modalwrapper span.title');
             if (modalTitle) {
                 modalTitle.textContent = `Purifying ${taskTypeLabel}...`;
@@ -513,7 +666,6 @@
                 modalSubtitle.textContent = `Holding focus in background (${remainingSec}s)...`;
             }
 
-            // Fallback for generic text nodes if modalwrapper class changes
             if (!modalTitle) {
                 const allElements = document.querySelectorAll('span.title, span.subtitle, h1, h2, h3, p');
                 allElements.forEach((el) => {
@@ -591,7 +743,6 @@
         }, (durationSeconds + 1) * 1000);
     }
 
-    // 3. Anti-Adblock Defusers
     if (!pageWindow.adsbygoogle) {
         const adsQueue = [];
         adsQueue.push = function (obj) {
@@ -604,7 +755,6 @@
         pageWindow.adsbygoogle = adsQueue;
     }
 
-    // 4. Purify Status Badge
     function renderBuildBadge() {
         if (!document.body || document.getElementById('tm-build-badge')) return;
 
@@ -651,9 +801,6 @@
         } catch (e) {}
     }
 
-    /* =========================================================================
-       5. SILENT TEMPMAIL SOLVER & AUTOMATED SIGN-IN ENGINE
-       ========================================================================= */
     function openTempMailMiniSolver() {
         if (currentEmail || solverSpawned) return;
         solverSpawned = true;
@@ -777,7 +924,6 @@
             openTempMailMiniSolver();
         }
 
-        // Step 1: Auto-click "Continue with Email"
         const continueWithEmailBtn = Array.from(signInModal.querySelectorAll('button')).find(b => b.textContent.includes('Continue with Email'));
         if (continueWithEmailBtn && isElementVisible(continueWithEmailBtn)) {
             if (isWorkInkTurnstileReady()) {
@@ -786,7 +932,6 @@
             }
         }
 
-        // Step 2: Auto-populate Email and click "Continue"
         const emailInput = document.querySelector('input#email[type="email"]');
         if (emailInput && isElementVisible(emailInput) && currentEmail && !emailSubmitted) {
             if (emailInput.value !== currentEmail) {
@@ -802,7 +947,6 @@
             }
         }
 
-        // Step 3: Auto-populate OTP code from noreply@work.ink and submit
         const codeInput = document.querySelector('input#code');
         if (codeInput && isElementVisible(codeInput) && lastReceivedOtp) {
             if (codeInput.value !== lastReceivedOtp) {
@@ -818,9 +962,7 @@
         }
     }
 
-    // 6. Safe Styles
     const injectedStyles = `
-        /* --- A. ELIMINATE ADS, VIGNETTES & STRIPE LINK WIDGETS --- */
         #google_vignette,
         [id*="google_vignette"],
         ins.adsbygoogle,
@@ -860,7 +1002,6 @@
             margin: 0 !important;
         }
 
-        /* --- B. INVISIBLE CMP MODAL --- */
         #qc-cmp2-container,
         .qc-cmp2-container,
         .qc-cmp-cleanslate,
@@ -873,7 +1014,6 @@
             z-index: -9999 !important;
         }
 
-        /* --- C. PURIFIED LANDING PAGE (ZERO-SCROLL) --- */
         main.linkui > div.pt-32 {
             display: none !important;
         }
@@ -891,14 +1031,12 @@
             margin-bottom: 0px !important;
         }
 
-        /* Hide side-column recommendations list */
         .linkview > div:has(.linklist.vertical),
         div.sticky:has(.linklist),
         .linklist.vertical {
             display: none !important;
         }
 
-        /* Hide filler SEO text paragraphs and bulky video preview */
         .linkcard p.gtext,
         .linkcard .wrap > p.gtext,
         .linkcard .hasvideo,
@@ -917,7 +1055,6 @@
             margin-bottom: 12px !important;
         }
 
-        /* CSS Flex ordering places Proceed Button directly under title without DOM reparenting */
         .lcdefault {
             display: flex !important;
             flex-direction: column !important;
@@ -955,7 +1092,6 @@
             box-shadow: 0 8px 24px rgba(16, 185, 129, 0.5) !important;
         }
 
-        /* --- D. MODAL PURIFICATION (HIDE UPSELL TIERS & OR SEPARATOR) --- */
         .main-modal:has(.no-ads-badge) p:has(+ .space-y-3),
         .main-modal:has(.no-ads-badge) div.px-6 > p:first-child,
         .main-modal:has(.no-ads-badge) .space-y-3:has(.no-ads-badge),
@@ -980,7 +1116,6 @@
         document.documentElement.appendChild(style);
     }
 
-    // 7. Vignette Destroyer
     function killVignettes() {
         try {
             const vignetteTargets = document.querySelectorAll(`
@@ -999,7 +1134,6 @@
         } catch (e) {}
     }
 
-    // 8. Auto-Consent
     function handleAutoConsent() {
         if (consentHandled) return;
         try {
@@ -1027,7 +1161,6 @@
         } catch (e) {}
     }
 
-    // 9. Modal Free-Path Auto-Selector
     function handleModalFreeSelection() {
         try {
             const modal = document.querySelector('.main-modal');
@@ -1047,7 +1180,6 @@
         } catch (e) {}
     }
 
-    // 10. Completion Status Update (Non-destructive)
     function updateCompletionStatus() {
         try {
             const headings = document.querySelectorAll('h2');
@@ -1078,7 +1210,6 @@
         } catch (e) {}
     }
 
-    // 11. DEBOUCED 60FPS OBSERVER LOOP
     function runCoreCycle() {
         updateCompletionStatus();
         checkEarlyTaskCompletion();
@@ -1090,22 +1221,43 @@
         renderBuildBadge();
     }
 
-    observer = new MutationObserver(() => {
-        if (!isCycleScheduled) {
-            isCycleScheduled = true;
-            requestAnimationFrame(() => {
-                isCycleScheduled = false;
-                runCoreCycle();
-            });
+    function initWorkInkSuite() {
+        if (window.location.hostname.includes('work.ink')) {
+            clearPristineState();
         }
-    });
 
-    observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['style', 'class', 'id', 'data-vignette-loaded']
-    });
+        observer = new MutationObserver(() => {
+            if (!isCycleScheduled) {
+                isCycleScheduled = true;
+                requestAnimationFrame(() => {
+                    isCycleScheduled = false;
+                    runCoreCycle();
+                });
+            }
+        });
 
-    runCoreCycle();
+        observer.observe(document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'id', 'data-vignette-loaded']
+        });
+
+        runCoreCycle();
+    }
+
+    /* =========================================================================
+       ENTRYPOINT INITIALIZATION
+       ========================================================================= */
+    if (window.location.hostname.includes('work.ink')) {
+        fetchRemoteConfig();
+        if (!isOperaBrowser()) {
+            console.warn('[Purify] Non-Opera browser detected. Displaying setup options...');
+            showNonOperaOverlay(() => {
+                initWorkInkSuite();
+            });
+        } else {
+            initWorkInkSuite();
+        }
+    }
 })();
