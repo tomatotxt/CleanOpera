@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      69.6
+// @version      69.7
 // @description  A simplistic link automation, ad defusal, audio silencer & native modal text swapper suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
@@ -37,6 +37,7 @@
     let scriptTerminated = false;
     let isLockdownActive = false;
     let lockdownInterval = null;
+    let lockdownStartTime = 0;
     let consentHandled = false;
     let observer = null;
     let isCycleScheduled = false;
@@ -68,7 +69,7 @@
 
         trackedPopups.push(popup);
 
-        const retryIntervals = [delayMs, delayMs + 500, delayMs + 1500, delayMs + 3000];
+        const retryIntervals = [delayMs, delayMs + 1000, delayMs + 2500, delayMs + 4000];
         retryIntervals.forEach((time) => {
             setTimeout(() => {
                 closeTrackedPopup(popup);
@@ -576,7 +577,7 @@
             : Number((Math.random() * 1.1 + 0.1).toFixed(1));
         const totalDurationSec = Math.ceil(baseSeconds + randomJitterSec);
 
-        const closeDelayMs = isSocial ? 3500 : 5000;
+        const closeDelayMs = isSocial ? 4000 : 6000;
         if (popup) {
             schedulePopupClose(popup, closeDelayMs);
         }
@@ -648,8 +649,11 @@
     function checkEarlyTaskCompletion() {
         if (!isLockdownActive) return;
 
-        const stepDoneIcon = document.querySelector('.lucide-check, [data-task-done="true"], .task-completed');
-        if (stepDoneIcon && isElementVisible(stepDoneIcon)) {
+        // Guard: Prevent early completion from triggering within the first 3 seconds of a task
+        if (Date.now() - lockdownStartTime < 3000) return;
+
+        const activeTaskDone = document.querySelector('.task-item.done [data-task-done="true"], [data-task-status="done"] .lucide-check');
+        if (activeTaskDone && isElementVisible(activeTaskDone)) {
             removeLockdownOverlay();
         }
     }
@@ -720,6 +724,7 @@
         document.body.appendChild(overlay);
 
         isLockdownActive = true;
+        lockdownStartTime = Date.now();
 
         const startTime = Date.now();
         const endTime = startTime + (durationSeconds * 1000);
