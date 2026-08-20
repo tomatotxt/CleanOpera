@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify
 // @namespace    https://work.ink/
-// @version      69.7
+// @version      69.8
 // @description  A simplistic link automation, ad defusal, audio silencer & native modal text swapper suite for Opera.
 // @author       tomatotxt
 // @match        https://work.ink/*
@@ -434,7 +434,7 @@
     function isExcludedFromIntercept(url) {
         if (!url || typeof url !== 'string') return true;
         if (/outgoing\.work\.ink/i.test(url)) return true;
-        return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank/i.test(url);
+        return /checkout\.work\.ink|pay\.work\.ink|stripe\.com|tempmail\.co|about:blank|_api\/v2\/destination/i.test(url);
     }
 
     function isOperaDownloadOffer(url) {
@@ -649,7 +649,6 @@
     function checkEarlyTaskCompletion() {
         if (!isLockdownActive) return;
 
-        // Guard: Prevent early completion from triggering within the first 3 seconds of a task
         if (Date.now() - lockdownStartTime < 3000) return;
 
         const activeTaskDone = document.querySelector('.task-item.done [data-task-done="true"], [data-task-status="done"] .lucide-check');
